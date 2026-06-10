@@ -1,11 +1,12 @@
 @use "github.com/jkroso/Prospects.jl" @struct
 @use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2 sign! graft!
-@use "./MIME.jl" MimePart mime_parse
+@use "./MIME.jl" MimePart mime_parse mime_encode
 @use EzXML: parsexml, root, Document, Node
 @use CodecZlib: GzipCompressor, GzipDecompressor
 @use UUIDs: uuid4
 @use Dates: now, UTC, format, @dateformat_str
 @use Base64: base64encode
+@use Downloads
 
 const TSFORMAT = dateformat"yyyy-mm-dd\THH:MM:SS.sss\Z"
 
@@ -133,16 +134,18 @@ text(node, xpath) = begin
   n === nothing ? "" : n.content
 end
 
+attr(node, name) = haskey(node, name) ? node[name] : ""
+
 parse_party(node, tag) = begin
   pid = Base.findfirst("./eb:PartyInfo/eb:$tag/eb:PartyId", node, RNS)
   role = text(node, "./eb:PartyInfo/eb:$tag/eb:Role")
-  pid === nothing ? ("", "", role) : (pid.content, something(pid["type"], ""), role)
+  pid === nothing ? ("", "", role) : (pid.content, attr(pid, "type"), role)
 end
 
 parse_usermessage(um::Node, attachments::Dict{String,Vector{UInt8}}) = begin
   parts = Part[]
   for pi in Base.findall("./eb:PayloadInfo/eb:PartInfo", um, RNS)
-    href = something(pi["href"], "")
+    href = attr(pi, "href")
     cid = startswith(href, "cid:") ? href[5:end] : href
     haskey(attachments, cid) || continue
     props = Dict(p["name"] => p.content for p in Base.findall(".//eb:PartProperties/eb:Property", pi, RNS))
@@ -183,15 +186,87 @@ parse_response(body::Vector{UInt8}, content_type::AbstractString) = begin
   info(x) = text(messaging, "./eb:SignalMessage/eb:MessageInfo/eb:$x")
   err = Base.findfirst("./eb:SignalMessage/eb:Error", messaging, RNS)
   if err !== nothing
-    return EbMSError(something(err["errorCode"], ""), something(err["severity"], ""),
-                     something(err["shortDescription"], ""), something(err["category"], ""),
+    return EbMSError(attr(err, "errorCode"), attr(err, "severity"),
+                     attr(err, "shortDescription"), attr(err, "category"),
                      text(err, "./eb:ErrorDetail"), info("RefToMessageId"))
   end
   receipt = Base.findfirst("./eb:SignalMessage/eb:Receipt", messaging, RNS)
   if receipt !== nothing
-    digests = [something(r["URI"], "") => text(r, "./ds:DigestValue")
+    digests = [attr(r, "URI") => text(r, "./ds:DigestValue")
                for r in Base.findall(".//ebbp:NonRepudiationInformation//ds:Reference", receipt, RNS)]
     return Receipt(message_id=info("MessageId"), ref_to_message_id=info("RefToMessageId"), digests=digests)
   end
   throw(TransportError("unrecognised ebMS signal"))
 end
+
+# ── transport + MEPs ──────────────────────────────────────────────────────────
+
+"""
+POST raw bytes. Returns `(status, headers::Dict, body)`. Header names lowercased.
+Connection-level failures become `TransportError`. TLS 1.3 comes from libcurl/OpenSSL.
+"""
+post(url::AbstractString, body::Vector{UInt8}, content_type::AbstractString; timeout=300) = begin
+  out = IOBuffer()
+  resp = try
+    Downloads.request(url; method="POST", input=IOBuffer(body), output=out,
+      headers=["Content-Type" => content_type], timeout=timeout, throw=true)
+  catch e
+    e isa Downloads.RequestError ? throw(TransportError("$(e.message) ($(e.code)) for $url")) : rethrow()
+  end
+  resp.status, Dict(lowercase(k) => v for (k, v) in resp.headers), take!(out)
+end
+
+"Assemble the final wire message: SOAP root part + gzipped attachment parts."
+wire(doc::Document, attachments) = begin
+  parts = [MimePart("application/soap+xml; charset=UTF-8", Vector{UInt8}(string(doc)); id="root@as4.invalid");
+           [MimePart("application/gzip", bytes; id=cid, headers=["Content-Transfer-Encoding" => "binary"])
+            for (cid, bytes) in attachments]]
+  mime_encode(parts)
+end
+
+"A selective PullRequest signal envelope (SBR profile: RefToMessageId inside eb:PullRequest)."
+pull_envelope(ref::AbstractString; timestamp=now(UTC)) = parsexml(
+  """<s:Envelope xmlns:s="$S12" xmlns:eb="$EB" xmlns:wsu="$WSU"><s:Header>""" *
+  """<eb:Messaging wsu:Id="ebmessaging" s:mustUnderstand="true"><eb:SignalMessage>""" *
+  """<eb:MessageInfo><eb:Timestamp>$(format(timestamp, TSFORMAT))</eb:Timestamp>""" *
+  """<eb:MessageId>$(uuid4())@as4.invalid</eb:MessageId></eb:MessageInfo>""" *
+  """<eb:PullRequest><eb:RefToMessageId>$(xmlescape(ref))</eb:RefToMessageId></eb:PullRequest>""" *
+  """</eb:SignalMessage></eb:Messaging></s:Header><s:Body wsu:Id="soapbody"/></s:Envelope>""")
+
+"POST a secured doc and parse the reply. Transport failures retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
+exchange(url, doc, attachments; retries=2) = begin
+  body, ctype = wire(doc, attachments)
+  local headers, rbody
+  attempt = 0
+  while true
+    try
+      _, headers, rbody = post(url, body, ctype)
+      break
+    catch e
+      (e isa TransportError && attempt < retries) || rethrow()
+      attempt += 1
+    end
+  end
+  parse_response(rbody, get(headers, "content-type", "application/soap+xml"))
+end
+
+"One-Way/Push: send a UserMessage, expect a Receipt (or an EbMSError)."
+push(url, msg::UserMessage; cred, assertion=nothing, retries=2) = begin
+  doc, atts = envelope(msg)
+  secure!(doc, atts, cred, assertion)
+  exchange(url, doc, atts; retries=retries)
+end
+
+"""
+One-Way/Selective-Pull: ask for the response to `ref`. Returns the pulled
+`UserMessage`, or `nothing` when the channel is empty (EBMS:0006 — keep polling).
+"""
+pull(url, ref::AbstractString; cred, assertion=nothing, retries=2) = begin
+  doc = pull_envelope(ref)
+  secure!(doc, [], cred, assertion)
+  r = exchange(url, doc, []; retries=retries)
+  r isa EbMSError && isempty_mpc(r) ? nothing : r
+end
+
+"Two-Way/Sync: send a UserMessage, expect the business response in the same HTTP exchange."
+sync_call(url, msg::UserMessage; cred, assertion=nothing, retries=2) = push(url, msg; cred=cred, assertion=assertion, retries=retries)
