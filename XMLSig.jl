@@ -24,7 +24,7 @@ Exclusive C14N 1.0 (no comments) of a whole document, or of the subtree selected
 by `xpath` (e.g. `//ds:SignedInfo` or `//*[@wsu:Id="body"]`) canonicalized in
 document context.
 """
-c14n(doc::Document, xpath=nothing; exclusive=true, prefixes=PREFIXES) = begin
+c14n(doc::Document, xpath=nothing; exclusive=true, comments=false, prefixes=PREFIXES, inclusive_prefixes=String[]) = begin
   nodeset = C_NULL
   if xpath !== nothing
     ctx = ccall((:xmlXPathNewContext, libxml2), Ptr{Cvoid}, (Ptr{Cvoid},), doc.node.ptr)
@@ -40,11 +40,21 @@ c14n(doc::Document, xpath=nothing; exclusive=true, prefixes=PREFIXES) = begin
     nodeset = unsafe_load(Ptr{Ptr{Cvoid}}(obj + 8))
   end
   out = Ref{Ptr{UInt8}}(C_NULL)
-  n = ccall((:xmlC14NDocDumpMemory, libxml2), Cint,
+  # null-terminated xmlChar** of InclusiveNamespaces PrefixList entries
+  inclusive_prefixes = String.(inclusive_prefixes)  # SubStrings aren't NUL-terminated
+  plist = isempty(inclusive_prefixes) ? C_NULL :
+    [[pointer(p) for p in inclusive_prefixes]; Ptr{UInt8}(C_NULL)]
+  n = GC.@preserve inclusive_prefixes ccall((:xmlC14NDocDumpMemory, libxml2), Cint,
     (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{Ptr{UInt8}}, Cint, Ptr{Ptr{UInt8}}),
-    doc.node.ptr, nodeset, exclusive ? 1 : 0, C_NULL, 0, out)
+    doc.node.ptr, nodeset, exclusive ? 1 : 0, plist, comments ? 1 : 0, out)
   n < 0 && error("c14n failed ($n)")
   unsafe_string(out[], n)
+end
+
+"PrefixList tokens of an InclusiveNamespaces child, if any."
+prefixlist(node::Node) = begin
+  inc = Base.findfirst(".//*[local-name()='InclusiveNamespaces']", node)
+  inc === nothing ? String[] : split(inc["PrefixList"])
 end
 
 # ── crypto primitives (libcrypto ccalls, proven by spike 2026-06-10) ──────────
@@ -168,9 +178,13 @@ digestbytes(alg, bytes) = alg == SHA256_URI ? sha256(bytes) :
 "Re-compute one ds:Reference and compare digests."
 function checkref(doc::Document, ref::Node, attachments)
   uri = ref["URI"]
-  transforms = [t["Algorithm"] for t in Base.findall(".//ds:Transform", ref, NS)]
+  tnodes = Base.findall(".//ds:Transform", ref, NS)
+  transforms = [t["Algorithm"] for t in tnodes]
+  plist = isempty(tnodes) ? String[] : reduce(vcat, prefixlist.(tnodes))
   dalg = Base.findfirst(".//ds:DigestMethod", ref, NS)["Algorithm"]
   expected = b64bytes(Base.findfirst(".//ds:DigestValue", ref, NS).content)
+  exc = EXC_C14N in transforms
+  id = startswith(uri, "#") ? replace(uri[2:end], r"^xpointer\(id\('(.*)'\)\)$" => s"\1") : ""
   bytes = if startswith(uri, "cid:")
     get(attachments, uri[5:end], nothing)
   elseif uri == ""
@@ -179,9 +193,9 @@ function checkref(doc::Document, ref::Node, attachments)
       sig = Base.findfirst("//ds:Signature", root(copy_), NS)
       sig === nothing || unlink!(sig)
     end
-    Vector{UInt8}(c14n(copy_; exclusive=EXC_C14N in transforms))
+    Vector{UInt8}(c14n(copy_; exclusive=exc, inclusive_prefixes=plist))
   elseif startswith(uri, "#")
-    Vector{UInt8}(c14n(doc, byid(uri[2:end]); exclusive=EXC_C14N in transforms))
+    Vector{UInt8}(c14n(doc, byid(id); exclusive=exc, inclusive_prefixes=plist))
   else
     nothing  # external references unsupported
   end
@@ -197,8 +211,8 @@ function verify(doc::Document; cert=nothing, attachments=Dict{String,Vector{UInt
   sig = Base.findfirst("//ds:Signature", root(doc), NS)
   sig === nothing && error("no ds:Signature in document")
   all(r -> checkref(doc, r, attachments), Base.findall(".//ds:Reference", sig, NS)) || return false
-  canon = Base.findfirst(".//ds:CanonicalizationMethod", sig, NS)["Algorithm"]
-  si = c14n(doc, "//ds:SignedInfo"; exclusive=canon == EXC_C14N)
+  cm = Base.findfirst(".//ds:CanonicalizationMethod", sig, NS)
+  si = c14n(doc, "//ds:SignedInfo"; exclusive=cm["Algorithm"] == EXC_C14N, inclusive_prefixes=prefixlist(cm))
   salg = Base.findfirst(".//ds:SignatureMethod", sig, NS)["Algorithm"]
   md = salg == RSA_SHA256 ? :sha256 : salg == RSA_SHA1 ? :sha1 : error("unsupported signature $salg")
   sv = b64bytes(Base.findfirst(".//ds:SignatureValue", sig, NS).content)
