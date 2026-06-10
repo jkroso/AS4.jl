@@ -1,32 +1,57 @@
 # AS4.jl
 
-Julia client for ebMS 3.0 / AS4 messaging, profiled for the ATO's SBR2 channel
-(BAS, STP, CTR lodgment). Client-only: pushes requests, pulls responses — no
-inbound HTTP endpoint required.
+A Julia client for ebMS 3.0 / AS4 — the protocol you must speak if you want to
+lodge BAS, STP, or company tax returns directly with the Australian Taxation
+Office's SBR2 channel.
 
-Layers:
+AS4 is what happens when a government is asked to send a file over the
+internet and answers with a committee. A business document may not simply be
+POSTed; it must be gzipped into a MIME part, strapped to a SOAP 1.2 envelope,
+described in an ebMS header, vouched for by a SAML assertion that you fetch
+from a separate token service via WS-Trust (signing *that* request too), and
+then signed — four times over, with XML canonicalization rules so delicate
+that two correct implementations can disagree about whitespace. The result is
+byte-for-byte reproducible XML, a phrase that should never have needed to
+exist. Every layer is an OASIS standard from the mid-2000s, and every layer is
+load-bearing. This library exists so nothing else in the stack has to know any
+of that.
 
-- `XMLSig.jl` — Exclusive C14N (libxml2) + XML-DSig sign/verify (libcrypto), incl. the WS-Security SwA attachment transform
-- `Keystore.jl` — ABR machine-credential `keystore.xml` (cert + encrypted PKCS#8 key)
-- `WSTrust.jl` — WS-Trust 1.3 client for the ATO MAS-ST security token service
-- `MIME.jl` — `multipart/related` writer + parser
-- `ebMS3.jl` — SOAP 1.2 envelope, `eb:Messaging`, push / selective-pull / sync MEPs
-- `SBR.jl` — ATO endpoints, header conventions, per-service builders (PAYEVNT, AS)
+To be fair to the ATO: having buried the treasure, they published the map —
+the wire format is thoroughly documented, the test STS is open, and their own
+reference keystores are on GitHub. Credit where due. The protocol still has a
+MIME boundary inside a SOAP envelope inside a signature inside a token dance,
+but at least it's *documented* bureaucracy.
 
-Design spec and primary-source research live in the Example repo:
-`docs/superpowers/specs/2026-06-11-as4-library-design.md`, `docs/research/sbr2/`.
+## Layers
 
-## Usage sketch
+| File | Job |
+|---|---|
+| `XMLSig.jl` | Exclusive C14N (libxml2) + XML-DSig sign/verify, incl. the WS-Security SwA attachment transform |
+| `Keystore.jl` | ABR machine-credential `keystore.xml` — cert chain + encrypted PKCS#8 key |
+| `WSTrust.jl` | WS-Trust 1.3 client for the ATO MAS-ST security token service |
+| `MIME.jl` | `multipart/related` writer + parser |
+| `ebMS3.jl` | SOAP envelope, `eb:Messaging`, WS-Security header, push / selective-pull / sync MEPs |
+| `SBR.jl` | ATO endpoints, header conventions, per-service builders (PAYEVNT, AS) |
+
+Client-only, light-client style: it initiates every exchange and never needs an
+inbound HTTP endpoint. No XML Encryption (the ATO profile doesn't use it
+client-side — TLS 1.3 carries confidentiality). Peppol e-invoicing could layer
+on the same core later.
+
+## Usage
 
 ```julia
 @use "github.com/jkroso/AS4.jl" load lodge collect_response payevnt_message Env
 
-cred = load("/path/to/keystore.xml", password)        # ABR machine credential
+cred = load("keystore.xml", password)                    # ABR machine credential
 msg = payevnt_message(payevnt_xml; abn="12 345 678 901",
                       product_id=SBR_PRODUCT_ID, bms=("Example","Example","1.0"))
 receipt = lodge(Env.EVTE, cred, msg)                     # STS token → signed push → Receipt
 resp = collect_response(Env.EVTE, cred, msg.message_id)  # nothing = poll again later
 ```
+
+Lower layers (`c14n`, `sign!`, `verify`, `issue_token`, `push`/`pull`/`sync_call`)
+are importable individually.
 
 ## Tests
 
@@ -44,12 +69,20 @@ test skips when the tool isn't installed.
 |---|---|
 | Exclusive C14N correct (incl. PrefixList, WithComments) | W3C merlin interop vectors, byte-exact digests |
 | XML-DSig sign/verify interoperable | aleksey rsa-sha256 vector verifies; our signatures verify in xmlsec1 (independent C stack) |
-| Verifier accepts real third-party AS4 stacks | signed captures from Governikus + helger APs verify |
+| Verifier accepts real third-party AS4 stacks | signed captures from Governikus + helger access points verify |
 | ABR machine-credential keystore decrypts | official ATO public EVTE keystore (real, expired) loads + signs |
-| WS-Trust RST accepted by the real ATO STS | **live EVTE exchange**: STS parsed the envelope and reached certificate-path validation (E2169 — the test credential expired 2024). Token issuance pending a current credential. |
+| WS-Trust RST accepted by the real ATO STS | **live EVTE exchange**: the STS parsed our envelope and reached certificate-path validation, objecting only that the public test credential expired in 2024 (E2169). Token issuance pending a current credential. |
 | MEP behaviour (push/receipt, empty-MPC pull, MessageId-stable retry) | mock-peer tests |
-| SwA attachment signing | self-verify + structure; WSS4J oracle written but **unrun** (no JVM here) |
-| EVTE end-to-end lodgment | **pending DSP registration** (test credential + endpoint access) |
+| SwA attachment signing | self-verify + structure; WSS4J oracle written but unrun (no JVM here) |
+| EVTE end-to-end lodgment | pending DSP registration (test credential + endpoint access) |
 
 AS.0004 Service/Action URIs are convention-derived — verify against the AS MIG
 before the first EVTE run (marked TODO in `SBR.jl`).
+
+## References
+
+- [SBR ebMS3 Web services Implementation Guide](https://www.sbr.gov.au/sbr-ebms3-webservices-artefacts) — the load-bearing document
+- [OASIS AS4 profile of ebMS 3.0](https://docs.oasis-open.org/ebxml-msg/ebms/v3.0/profiles/AS4-profile/v1.0/os/AS4-profile-v1.0-os.html)
+- [WSS 1.1 SwA Profile](https://docs.oasis-open.org/wss/v1.1/wss-v1.1-spec-os-SwAProfile.pdf) — attachment signing
+- [ato-pub/usi.cl.java](https://github.com/ato-pub/usi.cl.java) — official ATO reference client for the STS leg (and source of the public test keystore)
+- Fixture provenance: `test/fixtures/SOURCES.md`
