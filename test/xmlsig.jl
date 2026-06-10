@@ -43,6 +43,17 @@ end
   @test verify(doc)
 end
 
+@testset "SwA attachment refs" begin
+  doc = soapdoc()
+  att = Dict("part1@as4" => Vector{UInt8}("gzipped-bytes-pretend"))
+  sign!(doc, secnode(doc), ["body"], pair; attachments=att)
+  uris = [r["URI"] for r in findall("//ds:Reference", root(doc), ["ds"=>DS])]
+  @test "cid:part1@as4" in uris
+  @test verify(doc; cert=pair.cert_der, attachments=att)
+  @test !verify(doc; cert=pair.cert_der, attachments=Dict("part1@as4" => UInt8['x']))
+  @test !verify(doc; cert=pair.cert_der)  # attachment missing entirely
+end
+
 @testset "xmlsec1 oracle" begin
   xmlsec1 = Sys.which("xmlsec1")
   if xmlsec1 === nothing
