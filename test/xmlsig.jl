@@ -53,7 +53,8 @@ end
     path = tempname() * ".xml"
     write(path, string(doc))
     # xmlsec1 registers wsu:Id-style references per *node* type: --id-attr:Id <node-ns>:<name>
-    out = read(pipeline(ignorestatus(`$xmlsec1 verify --insecure --id-attr:Id x --id-attr:Id $S12:Body $path`), stderr=stdout), String)
-    @test occursin("Verification status: OK", out)
+    buf = IOBuffer()
+    run(pipeline(ignorestatus(`$xmlsec1 verify --insecure --id-attr:Id x --id-attr:Id $S12:Body $path`), stdout=buf, stderr=buf))
+    @test occursin("Verification status: OK", String(take!(buf)))
   end
 end
