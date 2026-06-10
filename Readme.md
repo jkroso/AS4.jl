@@ -65,8 +65,9 @@ but at least it's *documented* bureaucracy.
   without first reading several hundred pages of OASIS prose, which kept the
   riff-raff away from the endpoints more effectively than the signatures ever
   did. Then language models learned to read specification documents, and this
-  library was written in a day, supervised by a man who has read none of the
-  works cited above. The moat is dry. Everyone's in.
+  library was written in a day, supervised by a man who skimmed some of the
+  works cited above, on his phone, at his actual job. The moat is dry.
+  Everyone's in.
 
 This library implements the 2017 layer of that archaeology, by way of the
 2026 incident.
