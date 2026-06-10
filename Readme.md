@@ -22,6 +22,46 @@ reference keystores are on GitHub. Credit where due. The protocol still has a
 MIME boundary inside a SOAP envelope inside a signature inside a token dance,
 but at least it's *documented* bureaucracy.
 
+## A brief history of sending a file
+
+- **1996 — AS1.** The IETF asks: what if EDI documents, but over email? Signed,
+  encrypted business documents delivered via SMTP, with a signed receipt mailed
+  back. A complete success, except that it was email, so nobody could say with
+  confidence whether anything had arrived, including the receipts.
+
+- **2002 — AS2.** What if the same thing, but over HTTP? This one actually
+  worked, so naturally Walmart made it mandatory for every supplier on Earth,
+  and twenty-three years later it still moves a terrifying share of global
+  retail. The lesson — *keep it simple and ship it* — was duly recorded and
+  never consulted again.
+
+- **2007 — AS3.** What if the same thing, but over FTP? No one had asked, and
+  no one answered. AS3 is survived by its specification.
+
+- **Meanwhile, in a parallel universe — ebXML.** The UN and OASIS had spent the
+  same years designing ebMS, a messaging framework with every capability a
+  committee could vote for: SOAP envelopes, P-Modes, message partition
+  channels, pull semantics, reliability modules. ebMS 2.0 was so thorough that
+  implementing it became a career. ebMS 3.0 (2007) was the apology.
+
+- **2013 — AS4.** The grand synthesis: take AS2's "just enough" philosophy and
+  re-express it as a *conformance profile* of ebMS 3.0 — thereby achieving the
+  simplicity of AS2 by way of SOAP 1.2, WS-Security 1.1, XML Signature,
+  Exclusive Canonicalization, SOAP-with-Attachments, and a 90-page profile
+  document narrowing a larger document. It was promptly blessed as ISO 15000-2
+  and adopted by the EU for eDelivery, by Peppol for e-invoicing, and by the
+  Australian government for tax — the rare technology whose entire user base is
+  jurisdictions.
+
+- **2017 — Australia.** The ATO, selecting a transport for Standard Business
+  Reporting, looked upon AS4 — push *and* pull, four signatures per message, a
+  SAML token minted fresh every thirty minutes by a second web service — and
+  felt seen. They adopted it, then added two extensions the AS4 profile had
+  deliberately left out, restoring some of the complexity OASIS had worked so
+  hard to remove.
+
+This library implements the 2017 layer of that archaeology.
+
 ## Layers
 
 | File | Job |
