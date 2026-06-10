@@ -1,4 +1,5 @@
 @use "../XMLSig.jl" c14n verify
+@use "../MIME.jl" parse_dump
 @use EzXML: parsexml, root
 @use SHA: sha1
 @use Base64: base64encode
@@ -27,4 +28,12 @@ end
   @test d(inclusive_prefixes=pl) == digests[2]                  # + PrefixList
   @test d(comments=true) == digests[3]                          # WithComments
   @test d(comments=true, inclusive_prefixes=pl) == digests[4]   # WithComments + PrefixList
+end
+
+@testset "real AS4 captures from independent stacks verify" begin
+  for name in ["helger.as4in", "governikus.as4in"]
+    parts = parse_dump(read(joinpath(@__DIR__, "fixtures/phase4", name)))
+    doc = parsexml(parts[1].bytes)
+    @test verify(doc)  # cert taken from the embedded BinarySecurityToken
+  end
 end
