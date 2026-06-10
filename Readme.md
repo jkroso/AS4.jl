@@ -60,7 +60,16 @@ but at least it's *documented* bureaucracy.
   deliberately left out, restoring some of the complexity OASIS had worked so
   hard to remove.
 
-This library implements the 2017 layer of that archaeology.
+- **2026 — the filter fails.** Whatever else may be said of the stack, it
+  served one purpose with quiet distinction: nobody could lodge anything
+  without first reading several hundred pages of OASIS prose, which kept the
+  riff-raff away from the endpoints more effectively than the signatures ever
+  did. Then language models learned to read specification documents, and this
+  library was written in a day, supervised by a man who has read none of the
+  works cited above. The moat is dry. Everyone's in.
+
+This library implements the 2017 layer of that archaeology, by way of the
+2026 incident.
 
 ## Layers
 
