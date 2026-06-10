@@ -1,8 +1,11 @@
-@use "../ebMS3.jl" UserMessage Part envelope parse_response Receipt EbMSError TransportError isempty_mpc EB S12 WSU
+@use "../ebMS3.jl" UserMessage Part envelope secure! parse_response Receipt EbMSError TransportError isempty_mpc EB S12 WSU WSSE SAML2
+@use "../XMLSig.jl" verify load_pem_keypair DS
 @use "../MIME.jl" mime_encode MimePart
 @use EzXML: parsexml, root
 @use CodecZlib: GzipDecompressor
 @use Test...
+
+const pair = load_pem_keypair(joinpath(@__DIR__, "fixtures/key.pem"), joinpath(@__DIR__, "fixtures/cert.pem"))
 
 const payload = Vector{UInt8}("<PAYEVNT><Rp><Abn>12345678901</Abn></Rp></PAYEVNT>")
 
@@ -107,4 +110,53 @@ end
 @testset "SOAP fault without eb:Messaging is a TransportError" begin
   raw = """<S12:Envelope xmlns:S12="$S12"><S12:Body><S12:Fault><S12:Code><S12:Value>S12:Sender</S12:Value></S12:Code><S12:Reason><S12:Text xml:lang="en">bad request</S12:Text></S12:Reason></S12:Fault></S12:Body></S12:Envelope>"""
   @test_throws TransportError parse_response(Vector{UInt8}(raw), "application/soap+xml")
+end
+
+# ── WS-Security header (SBR profile shape) ────────────────────────────────────
+
+fake_assertion() = root(parsexml("""<saml2:EncryptedAssertion xmlns:saml2="$SAML2"><xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#">opaque-ciphertext</xenc:EncryptedData></saml2:EncryptedAssertion>"""))
+
+@testset "secured envelope: BST + assertion + 4-part signature" begin
+  msg = mkmsg()
+  doc, atts = envelope(msg)
+  secure!(doc, atts, pair, fake_assertion())
+  wns = [ns; "wsse"=>WSSE; "ds"=>DS; "saml2"=>SAML2]
+  sec = findfirst("//wsse:Security", root(doc), wns)
+  @test sec !== nothing
+  @test findfirst(".//wsse:BinarySecurityToken", sec, wns) !== nothing
+  @test findfirst(".//saml2:EncryptedAssertion", sec, wns) !== nothing
+  @test findfirst(".//saml2:EncryptedAssertion//*[local-name()='EncryptedData']", sec, wns).content == "opaque-ciphertext"
+  refs = [r["URI"] for r in findall(".//ds:Reference", sec, wns)]
+  @test "#ebmessaging" in refs && "#soapbody" in refs && "#assertion" in refs
+  @test any(startswith.(refs, "cid:"))
+  # KeyInfo is a SecurityTokenReference to the BST, not X509Data
+  @test findfirst(".//ds:KeyInfo/wsse:SecurityTokenReference/wsse:Reference", sec, wns)["URI"] == "#signingCert"
+  @test verify(doc; cert=pair.cert_der, attachments=Dict(atts))
+end
+
+@testset "secured envelope without token (pre-STS use)" begin
+  msg = mkmsg()
+  doc, atts = envelope(msg)
+  secure!(doc, atts, pair, nothing)
+  refs = [r["URI"] for r in findall("//ds:Reference", root(doc), ["ds"=>DS])]
+  @test !("#assertion" in refs) && "#ebmessaging" in refs
+  @test verify(doc; cert=pair.cert_der, attachments=Dict(atts))
+end
+
+@testset "xmlsec1 oracle on the secured envelope" begin
+  xmlsec1 = Sys.which("xmlsec1")
+  if xmlsec1 === nothing
+    @test_skip "xmlsec1 not installed"
+  else
+    msg = UserMessage(from=("1","t","r"), to=("2","t","r"), service="s", action="a")  # no attachments: xmlsec1 can't resolve cid:
+    doc, atts = envelope(msg)
+    secure!(doc, atts, pair, fake_assertion())
+    path = tempname() * ".xml"
+    write(path, string(doc))
+    buf = IOBuffer()
+    run(pipeline(ignorestatus(`$xmlsec1 verify --insecure --lax-key-search --pubkey-cert-pem $(joinpath(@__DIR__, "fixtures/cert.pem"))
+                               --id-attr:Id $EB:Messaging --id-attr:Id $S12:Body --id-attr:Id $SAML2:EncryptedAssertion $path`),
+                 stdout=buf, stderr=buf))
+    @test occursin("Verification status: OK", String(take!(buf)))
+  end
 end
