@@ -1,6 +1,7 @@
 @use "github.com/jkroso/Prospects.jl" @struct
 @use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2
-@use EzXML: parsexml, root, Document
+@use "./MIME.jl" MimePart mime_parse
+@use EzXML: parsexml, root, Document, Node
 @use CodecZlib: GzipCompressor, GzipDecompressor
 @use UUIDs: uuid4
 @use Dates: now, UTC, format, @dateformat_str
@@ -65,4 +66,103 @@ envelope(msg::UserMessage; timestamp=now(UTC)) = begin
     """<eb:CollaborationInfo>$collab</eb:CollaborationInfo>$props$payloads""" *
     """</eb:UserMessage></eb:Messaging></s:Header><s:Body wsu:Id="soapbody"/></s:Envelope>"""
   parsexml(xml), [p.cid => transcode(GzipCompressor, p.bytes) for p in msg.parts]
+end
+
+# ── response parsing ──────────────────────────────────────────────────────────
+
+"A positive ebMS3 acknowledgment, with non-repudiation digests when present."
+@struct struct Receipt
+  message_id::String
+  ref_to_message_id::String
+  digests::Vector{Pair{String,String}} = Pair{String,String}[]  # reference URI => DigestValue
+end
+
+"An ebMS3 Error signal."
+struct EbMSError <: Exception
+  code::String
+  severity::String
+  short::String
+  category::String
+  detail::String
+  ref_to_message_id::String
+end
+Base.showerror(io::IO, e::EbMSError) = print(io, "EbMSError $(e.code) ($(e.severity)) $(e.short): $(e.detail)")
+
+"EBMS:0006 — a pull found nothing queued. The 'keep polling' signal, not a failure."
+isempty_mpc(e::EbMSError) = e.code == "EBMS:0006"
+
+"Transport- or SOAP-level failure with no ebMS Messaging header to interpret."
+struct TransportError <: Exception
+  message::String
+end
+Base.showerror(io::IO, e::TransportError) = print(io, "TransportError: ", e.message)
+
+const RNS = ["s"=>S12, "eb"=>EB, "ds"=>DS, "ebbp"=>"http://docs.oasis-open.org/ebxml-bp/ebbp-signals-2.0"]
+
+text(node, xpath) = begin
+  n = Base.findfirst(xpath, node, RNS)
+  n === nothing ? "" : n.content
+end
+
+parse_party(node, tag) = begin
+  pid = Base.findfirst("./eb:PartyInfo/eb:$tag/eb:PartyId", node, RNS)
+  role = text(node, "./eb:PartyInfo/eb:$tag/eb:Role")
+  pid === nothing ? ("", "", role) : (pid.content, something(pid["type"], ""), role)
+end
+
+parse_usermessage(um::Node, attachments::Dict{String,Vector{UInt8}}) = begin
+  parts = Part[]
+  for pi in Base.findall("./eb:PayloadInfo/eb:PartInfo", um, RNS)
+    href = something(pi["href"], "")
+    cid = startswith(href, "cid:") ? href[5:end] : href
+    haskey(attachments, cid) || continue
+    props = Dict(p["name"] => p.content for p in Base.findall(".//eb:PartProperties/eb:Property", pi, RNS))
+    bytes = attachments[cid]
+    get(props, "CompressionType", "") == "application/gzip" && (bytes = transcode(GzipDecompressor, bytes))
+    push!(parts, Part(bytes=bytes, cid=cid,
+                      name=get(props, "DocumentName", ""), doctype=get(props, "DocumentType", ""),
+                      mime=get(props, "MimeType", "")))
+  end
+  UserMessage(
+    from=parse_party(um, "From"), to=parse_party(um, "To"),
+    service=text(um, "./eb:CollaborationInfo/eb:Service"),
+    action=text(um, "./eb:CollaborationInfo/eb:Action"),
+    agreement=(a = text(um, "./eb:CollaborationInfo/eb:AgreementRef"); isempty(a) ? nothing : a),
+    conversation_id=text(um, "./eb:CollaborationInfo/eb:ConversationId"),
+    message_id=text(um, "./eb:MessageInfo/eb:MessageId"),
+    properties=[p["name"] => p.content for p in Base.findall("./eb:MessageProperties/eb:Property", um, RNS)],
+    parts=parts)
+end
+
+"""
+Parse a response body into a `Receipt`, `EbMSError`, or `UserMessage`.
+Throws `TransportError` for SOAP faults without an ebMS Messaging header.
+"""
+parse_response(body::Vector{UInt8}, content_type::AbstractString) = begin
+  parts = occursin("multipart/related", content_type) ? mime_parse(body, content_type) :
+          [MimePart(String(content_type), body)]
+  isempty(parts) && throw(TransportError("empty response body"))
+  doc = parsexml(parts[1].bytes)
+  attachments = Dict(p.id => p.bytes for p in parts[2:end])
+  messaging = Base.findfirst("//eb:Messaging", root(doc), RNS)
+  if messaging === nothing
+    reason = text(root(doc), "//s:Fault//s:Text")
+    throw(TransportError(isempty(reason) ? "no eb:Messaging in response" : "SOAP fault: $reason"))
+  end
+  um = Base.findfirst("./eb:UserMessage", messaging, RNS)
+  um === nothing || return parse_usermessage(um, attachments)
+  info(x) = text(messaging, "./eb:SignalMessage/eb:MessageInfo/eb:$x")
+  err = Base.findfirst("./eb:SignalMessage/eb:Error", messaging, RNS)
+  if err !== nothing
+    return EbMSError(something(err["errorCode"], ""), something(err["severity"], ""),
+                     something(err["shortDescription"], ""), something(err["category"], ""),
+                     text(err, "./eb:ErrorDetail"), info("RefToMessageId"))
+  end
+  receipt = Base.findfirst("./eb:SignalMessage/eb:Receipt", messaging, RNS)
+  if receipt !== nothing
+    digests = [something(r["URI"], "") => text(r, "./ds:DigestValue")
+               for r in Base.findall(".//ebbp:NonRepudiationInformation//ds:Reference", receipt, RNS)]
+    return Receipt(message_id=info("MessageId"), ref_to_message_id=info("RefToMessageId"), digests=digests)
+  end
+  throw(TransportError("unrecognised ebMS signal"))
 end
