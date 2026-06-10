@@ -1,0 +1,5 @@
+[deps]
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
+EzXML = "8f5d6c58-4d21-5cfd-889c-e3ad7ee6a615"
+OpenSSL = "4d8831e6-92b7-49fb-bdf8-b643e874388c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
