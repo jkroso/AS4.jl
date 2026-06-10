@@ -1,10 +1,11 @@
 @use "github.com/jkroso/Prospects.jl" @struct
-@use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2
+@use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2 sign! graft!
 @use "./MIME.jl" MimePart mime_parse
 @use EzXML: parsexml, root, Document, Node
 @use CodecZlib: GzipCompressor, GzipDecompressor
 @use UUIDs: uuid4
 @use Dates: now, UTC, format, @dateformat_str
+@use Base64: base64encode
 
 const TSFORMAT = dateformat"yyyy-mm-dd\THH:MM:SS.sss\Z"
 
@@ -66,6 +67,34 @@ envelope(msg::UserMessage; timestamp=now(UTC)) = begin
     """<eb:CollaborationInfo>$collab</eb:CollaborationInfo>$props$payloads""" *
     """</eb:UserMessage></eb:Messaging></s:Header><s:Body wsu:Id="soapbody"/></s:Envelope>"""
   parsexml(xml), [p.cid => transcode(GzipCompressor, p.bytes) for p in msg.parts]
+end
+
+# ── WS-Security (SBR profile: BST + opaque SAML assertion + 4-part signature) ─
+
+const X509V3 = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
+const B64ENC = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
+
+"Serialize an element, injecting wsu:Id on its opening tag (used for the opaque assertion)."
+with_wsu_id(node, id) = replace(string(node), r"^<([^\s>]+)" => SubstitutionString("""<\\1 xmlns:wsu="$WSU" wsu:Id="$id\""""); count=1)
+
+"""
+Add the WS-Security header per the SBR ebMS3 profile: an X509 BinarySecurityToken
+(the machine credential), the STS-issued `saml2:EncryptedAssertion` inserted
+verbatim (pass `nothing` before a token is held), and one signature over
+eb:Messaging + assertion + body + every attachment. `cred` needs `.key` +
+`.cert_der` (a `Keystore.Credential` or test keypair).
+"""
+secure!(doc::Document, attachments, cred, assertion=nothing) = begin
+  header = Base.findfirst("//s:Header", root(doc), RNS)
+  header === nothing && error("no SOAP header")
+  bst = """<wsse:BinarySecurityToken EncodingType="$B64ENC" ValueType="$X509V3" wsu:Id="signingCert">$(base64encode(cred.cert_der))</wsse:BinarySecurityToken>"""
+  asrt = assertion === nothing ? "" : with_wsu_id(assertion, "assertion")
+  sec = """<wsse:Security xmlns:wsse="$WSSE" xmlns:wsu="$WSU" s:mustUnderstand="true" xmlns:s="$S12">$bst$asrt</wsse:Security>"""
+  secnode = graft!(header, root(parsexml(sec)))
+  ids = assertion === nothing ? ["ebmessaging", "soapbody"] : ["ebmessaging", "assertion", "soapbody"]
+  str = """<ds:KeyInfo><wsse:SecurityTokenReference xmlns:wsse="$WSSE"><wsse:Reference URI="#signingCert" ValueType="$X509V3"/></wsse:SecurityTokenReference></ds:KeyInfo>"""
+  sign!(doc, secnode, ids, cred; attachments=Dict(attachments), keyinfo=str)
+  doc
 end
 
 # ── response parsing ──────────────────────────────────────────────────────────
