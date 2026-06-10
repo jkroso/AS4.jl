@@ -16,6 +16,18 @@ Layers:
 Design spec and primary-source research live in the Example repo:
 `docs/superpowers/specs/2026-06-11-as4-library-design.md`, `docs/research/sbr2/`.
 
+## Usage sketch
+
+```julia
+@use "github.com/jkroso/AS4.jl" load lodge collect_response payevnt_message Env
+
+cred = load("/path/to/keystore.xml", password)        # ABR machine credential
+msg = payevnt_message(payevnt_xml; abn="12 345 678 901",
+                      product_id=SBR_PRODUCT_ID, bms=("Example","Example","1.0"))
+receipt = lodge(Env.EVTE, cred, msg)                     # STS token → signed push → Receipt
+resp = collect_response(Env.EVTE, cred, msg.message_id)  # nothing = poll again later
+```
+
 ## Tests
 
 ```sh
@@ -23,5 +35,21 @@ julia --project=. test/runtests.jl     # everything
 julia --project=. test/xmlsig.jl       # one layer
 ```
 
-Gated extras: `AS4_LIVE=1` enables the live EVTE STS smoke; xmlsec1/WSS4J
-oracle tests skip when the tools aren't installed.
+Gated extras: `AS4_LIVE=1` enables the live EVTE STS smoke; the xmlsec1 oracle
+test skips when the tool isn't installed.
+
+## Verification status (2026-06-11)
+
+| Claim | Evidence |
+|---|---|
+| Exclusive C14N correct (incl. PrefixList, WithComments) | W3C merlin interop vectors, byte-exact digests |
+| XML-DSig sign/verify interoperable | aleksey rsa-sha256 vector verifies; our signatures verify in xmlsec1 (independent C stack) |
+| Verifier accepts real third-party AS4 stacks | signed captures from Governikus + helger APs verify |
+| ABR machine-credential keystore decrypts | official ATO public EVTE keystore (real, expired) loads + signs |
+| WS-Trust RST accepted by the real ATO STS | **live EVTE exchange**: STS parsed the envelope and reached certificate-path validation (E2169 — the test credential expired 2024). Token issuance pending a current credential. |
+| MEP behaviour (push/receipt, empty-MPC pull, MessageId-stable retry) | mock-peer tests |
+| SwA attachment signing | self-verify + structure; WSS4J oracle written but **unrun** (no JVM here) |
+| EVTE end-to-end lodgment | **pending DSP registration** (test credential + endpoint access) |
+
+AS.0004 Service/Action URIs are convention-derived — verify against the AS MIG
+before the first EVTE run (marked TODO in `SBR.jl`).
