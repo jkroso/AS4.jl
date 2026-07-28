@@ -74,14 +74,16 @@ end
 
 """
 Load a machine credential from an ABR `keystore.xml`. Picks the first
-`<credential>` unless `id` is given. The leaf certificate is matched to the
-credential's `<serialNumber>`.
+`<credential>` unless `id` or `abn` selects one (the ATO's EVTE keystore
+holds one credential per test-entity ABN). The leaf certificate is matched
+to the credential's `<serialNumber>`.
 """
-load(path::AbstractString, password::AbstractString; id=nothing) = begin
+load(path::AbstractString, password::AbstractString; id=nothing, abn=nothing) = begin
   doc = parsexml(read(path, String))
-  sel = id === nothing ? "//c:credential[1]" : """//c:credential[@id="$id"]"""
+  sel = id !== nothing ? """//c:credential[@id="$id"]""" :
+        abn !== nothing ? """//c:credential[c:abn="$abn"]""" : "//c:credential[1]"
   cred = findfirst(sel, root(doc), CNS)
-  cred === nothing && error("credential $(id === nothing ? 1 : id) not found in $path")
+  cred === nothing && error("credential $(something(id, abn, 1)) not found in $path")
   field(name) = (n = findfirst("./c:$name", cred, CNS); n === nothing ? "" : n.content)
   serial = field("serialNumber")
   certs = cms_certs(b64(field("publicCertificate")))
