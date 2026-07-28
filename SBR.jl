@@ -36,15 +36,18 @@ agent_party(tan) = (replace(tan, " " => ""), TAN_TYPE, "http://sbr.gov.au/ato/Ro
 
 ato_party() = (ATO_ABN, ABN_TYPE, "http://sbr.gov.au/agency")
 
-# Service/Action URIs. PAYEVNT verified against the ATO's published 2020 wire
-# samples. AS.0004 values follow the same convention — TODO-verify against the
-# AS MIG (in the package ZIP) before first EVTE run.
+# Service/Action URIs, verified against the ATO Service Registry (Jan 2026
+# XLSX, "Service Actions" sheet, CollaborationInfo columns).
 const SERVICES = Dict(
   :payevnt_submit => (service="http://sbr.gov.au/ato/payevnt/2020", action="Submit.004.00", doc="PAYEVNT", mep=:bulk),
   :payevnt_update => (service="http://sbr.gov.au/ato/payevnt/2020", action="Update.004.00", doc="PAYEVNTEMP", mep=:bulk),
+  :payevnt_adjust => (service="http://sbr.gov.au/ato/payevnt/2020", action="Adjust.004.00", doc="PAYEVNT", mep=:bulk),
+  :payevntrecon_list => (service="http://sbr.gov.au/ato/payevntrecon/2023", action="List.001.00", doc="PAYEVNTRECON", mep=:sync),
   :as_get => (service="http://sbr.gov.au/ato/as/2025", action="Get.004.00", doc="AS", mep=:sync),
   :as_validate => (service="http://sbr.gov.au/ato/as/2025", action="Validate.004.00", doc="AS", mep=:sync),
-  :as_submit => (service="http://sbr.gov.au/ato/as/2025", action="Submit.004.00", doc="AS", mep=:sync))
+  :as_submit => (service="http://sbr.gov.au/ato/as/2025", action="Submit.004.00", doc="AS", mep=:sync),
+  :ctr_submit => (service="http://sbr.gov.au/ato/ctr/2026", action="Submit.017.00", doc="CTR", mep=:sync),
+  :ctr_validate => (service="http://sbr.gov.au/ato/ctr/2026", action="Validate.017.00", doc="CTR", mep=:sync))
 
 mandatory_properties(product_id, (vendor, name, version)) =
   ["ProductID" => product_id, "BMS Vendor" => vendor, "BMS Name" => name, "BMS Version" => version]
@@ -72,7 +75,8 @@ business response arrives later via `collect_response`.
 lodge(env, cred::Credential, msg::UserMessage; cache=TokenCache(), retries=2) = begin
   s = sts(env)
   token = current_token(cache, cred, s.url, s.applies_to)
-  url = occursin("payevnt", msg.service) ? endpoints(env).bulk_push : endpoints(env).single_sync
+  # pay events are Bulk-Async; everything else (incl. payevntrecon list) is Single-Sync
+  url = occursin("/payevnt/", msg.service) ? endpoints(env).bulk_push : endpoints(env).single_sync
   push(url, msg; cred=cred, assertion=token.assertion, retries=retries)
 end
 
