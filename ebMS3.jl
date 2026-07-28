@@ -90,7 +90,8 @@ secure!(doc::Document, attachments, cred, assertion=nothing) = begin
   header === nothing && error("no SOAP header")
   bst = """<wsse:BinarySecurityToken EncodingType="$B64ENC" ValueType="$X509V3" wsu:Id="signingCert">$(base64encode(cred.cert_der))</wsse:BinarySecurityToken>"""
   asrt = assertion === nothing ? "" : with_wsu_id(assertion, "assertion")
-  sec = """<wsse:Security xmlns:wsse="$WSSE" xmlns:wsu="$WSU" s:mustUnderstand="true" xmlns:s="$S12">$bst$asrt</wsse:Security>"""
+  # WIG sample layout: EncryptedAssertion, then BST, then Signature (strict gateways enforce order)
+  sec = """<wsse:Security xmlns:wsse="$WSSE" xmlns:wsu="$WSU" s:mustUnderstand="true" xmlns:s="$S12">$asrt$bst</wsse:Security>"""
   secnode = graft!(header, root(parsexml(sec)))
   ids = assertion === nothing ? ["ebmessaging", "soapbody"] : ["ebmessaging", "assertion", "soapbody"]
   str = """<ds:KeyInfo><wsse:SecurityTokenReference xmlns:wsse="$WSSE"><wsse:Reference URI="#signingCert" ValueType="$X509V3"/></wsse:SecurityTokenReference></ds:KeyInfo>"""
@@ -216,8 +217,9 @@ post(url::AbstractString, body::Vector{UInt8}, content_type::AbstractString; tim
   resp.status, Dict(lowercase(k) => v for (k, v) in resp.headers), take!(out)
 end
 
-"Assemble the final wire message: SOAP root part + gzipped attachment parts."
+"Assemble the final wire message: bare SOAP when there are no attachments, else SOAP root part + gzipped attachment parts."
 wire(doc::Document, attachments) = begin
+  isempty(attachments) && return Vector{UInt8}(string(doc)), "application/soap+xml; charset=UTF-8"
   parts = [MimePart("application/soap+xml; charset=UTF-8", Vector{UInt8}(string(doc)); id="root@as4.invalid");
            [MimePart("application/gzip", bytes; id=cid, headers=["Content-Transfer-Encoding" => "binary"])
             for (cid, bytes) in attachments]]
