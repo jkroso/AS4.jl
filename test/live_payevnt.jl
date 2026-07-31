@@ -3,7 +3,7 @@ Live EVTE PAYEVNT submit — run manually, never in CI:
 
   AS4_KEYSTORE=/path/to/evte.keystore.xml \
   AS4_PASSWORD=… \
-  AS4_SUITE=~/Desktop/SBR-conformance/payevnt-suite/inner \
+  AS4_SUITE=/path/to/payevnt-suite/inner \
   julia --project=. test/live_payevnt.jl
 
 Pushes conformance scenario BULK-001 (PAYEVNT + 3× PAYEVNTEMP) to the EVTE
@@ -16,7 +16,7 @@ see `bulk_payload` in SBR.jl.
 @use "../ebMS3.jl" UserMessage Part Receipt EbMSError TransportError push pull
 @use "../WSTrust.jl" issue_token
 @use "../Keystore.jl" load
-@use Dates: now, UTC, format, @dateformat_str
+@use "./suite_fixtures.jl" payload
 
 const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const scenario = joinpath(suite, "CONF-ATO-PAYEVNT-BULK-001")
@@ -25,19 +25,11 @@ const ABN = "67094544519"  # YALACT P/L — payer in BULK-001, must match the cr
 cred = load(expanduser(ENV["AS4_KEYSTORE"]), ENV["AS4_PASSWORD"]; id="ABRD:$(ABN)_YALACT129")
 @info "credential" cred.abn cred.legal_name cred.not_after
 
-today = format(now(UTC), dateformat"yyyy-mm-dd")
-stamp = format(now(UTC), dateformat"yyyy-mm-dd\THH:MM:SS.sss\Z")
-"Conformance payloads ship with empty date fields for the DSP to populate."
-fill_dates(xml) = replace(replace(xml,
-    "<tns:MessageTimestampGenerationDt></tns:MessageTimestampGenerationDt>" =>
-    "<tns:MessageTimestampGenerationDt>$stamp</tns:MessageTimestampGenerationDt>"),
-  r"<tns:(\w+D)></tns:\1>" => SubstitutionString("<tns:\\1>$today</tns:\\1>"))
-
-payload(name) = Vector{UInt8}(fill_dates(read(joinpath(scenario, name), String)))
+doc(name) = payload(joinpath(scenario, name))
 
 msg, ids = payevnt_message(
-  payload("CONF-ATO-PAYEVNT-BULK-001_Submit_Request_01.xml"),
-  [payload("CONF-ATO-PAYEVNTEMP-BULK-001_Submit_Request_0$i.xml") for i in 2:4];
+  doc("CONF-ATO-PAYEVNT-BULK-001_Submit_Request_01.xml"),
+  [doc("CONF-ATO-PAYEVNTEMP-BULK-001_Submit_Request_0$i.xml") for i in 2:4];
   abn=ABN, product_id=get(ENV, "AS4_PRODUCT_ID", ""),
   bms=("Example", "Example", "0.1.0"))
 @info "message properties" msg.properties

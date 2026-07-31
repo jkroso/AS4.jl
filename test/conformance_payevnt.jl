@@ -28,20 +28,13 @@ self-lodger product.
 @use "../XMLSig.jl" verify load_pem_keypair
 @use "../WSTrust.jl" issue_token
 @use "../Keystore.jl" load
-@use Dates: now, UTC, format, @dateformat_str
+@use "./suite_fixtures.jl" payload
 @use Test...
 
 const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const live = get(ENV, "AS4_LIVE", "") == "1"
 const only = get(ENV, "AS4_SCENARIO", "")
 
-const today = format(now(UTC), dateformat"yyyy-mm-dd")
-const stamp = format(now(UTC), dateformat"yyyy-mm-dd\THH:MM:SS.sss\Z")
-"The suite ships empty date fields for the DSP to populate (so payloads don't age)."
-fill_dates(xml) = replace(replace(xml,
-    "<tns:MessageTimestampGenerationDt></tns:MessageTimestampGenerationDt>" =>
-    "<tns:MessageTimestampGenerationDt>$stamp</tns:MessageTimestampGenerationDt>"),
-  r"<tns:(\w+D)></tns:\1>" => SubstitutionString("<tns:\\1>$today</tns:\\1>"))
 
 first_match(re, s) = (m = match(re, s); m === nothing ? nothing : m[1])
 
@@ -99,7 +92,6 @@ manifest() = begin
   subs, skipped
 end
 
-payload(path) = Vector{UInt8}(fill_dates(read(path, String)))
 
 message(s::Submission; product_id=get(ENV, "AS4_PRODUCT_ID", "")) = begin
   from = s.agent_tan !== nothing ? agent_party(s.agent_tan) :
