@@ -8,16 +8,17 @@ Live EVTE PAYEVNT submit — run manually, never in CI:
 
 Pushes conformance scenario BULK-001 (PAYEVNT + 3× PAYEVNTEMP) to the EVTE
 bulk channel as the matching test entity (YALACT129), then selective-pulls
-for the business response. AS4_PRODUCT_ID sets a ProductID message property;
-leave it unset to probe whether EVTE accepts a submission without one.
+for the business response. AS4_PRODUCT_ID is the ATO-allocated EVTE product ID.
+All four documents travel in ONE attachment, separated by record delimiters —
+see `bulk_payload` in SBR.jl.
 =#
-@use "../SBR.jl" Env sts endpoints business_party ato_party SERVICES
+@use "../SBR.jl" Env sts endpoints payevnt_message
 @use "../ebMS3.jl" UserMessage Part Receipt EbMSError TransportError push pull
 @use "../WSTrust.jl" issue_token
 @use "../Keystore.jl" load
 @use Dates: now, UTC, format, @dateformat_str
 
-const suite = expanduser(get(ENV, "AS4_SUITE", "~/Desktop/SBR-conformance/payevnt-suite/inner"))
+const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const scenario = joinpath(suite, "CONF-ATO-PAYEVNT-BULK-001")
 const ABN = "67094544519"  # YALACT P/L — payer in BULK-001, must match the credential entity
 
@@ -33,18 +34,14 @@ fill_dates(xml) = replace(replace(xml,
   r"<tns:(\w+D)></tns:\1>" => SubstitutionString("<tns:\\1>$today</tns:\\1>"))
 
 payload(name) = Vector{UInt8}(fill_dates(read(joinpath(scenario, name), String)))
-parts = [Part(payload("CONF-ATO-PAYEVNT-BULK-001_Submit_Request_01.xml"); name="PAYEVNT", doctype="BASE");
-         [Part(payload("CONF-ATO-PAYEVNTEMP-BULK-001_Submit_Request_0$i.xml"); name="PAYEVNTEMP", doctype="BASE")
-          for i in 2:4]]
 
-properties = ["BMS Vendor" => "Example", "BMS Name" => "Example", "BMS Version" => "0.1.0"]
-haskey(ENV, "AS4_PRODUCT_ID") && pushfirst!(properties, "ProductID" => ENV["AS4_PRODUCT_ID"])
-@info "message properties" properties
-
-svc = SERVICES[:payevnt_submit]
-msg = UserMessage(from=business_party(ABN), to=ato_party(),
-                  service=svc.service, action=svc.action,
-                  properties=properties, parts=parts)
+msg, ids = payevnt_message(
+  payload("CONF-ATO-PAYEVNT-BULK-001_Submit_Request_01.xml"),
+  [payload("CONF-ATO-PAYEVNTEMP-BULK-001_Submit_Request_0$i.xml") for i in 2:4];
+  abn=ABN, product_id=get(ENV, "AS4_PRODUCT_ID", ""),
+  bms=("Example", "Example", "0.1.0"))
+@info "message properties" msg.properties
+@info "record delimiters" ids payload_bytes = length(msg.parts[1].bytes)
 
 s, eps = sts(Env.EVTE), endpoints(Env.EVTE)
 token = issue_token(cred, s.url, s.applies_to)

@@ -6,7 +6,7 @@ Offline (default) — for every BULK scenario: build the message set (dates
 filled), sign it, and verify the signature locally. Proves assembly for the
 whole suite without touching the network.
 
-  AS4_SUITE=~/Desktop/SBR-conformance/payevnt-suite/inner \
+  AS4_SUITE=/path/to/payevnt-suite/inner \
   julia --project=. test/conformance_payevnt.jl
 
 Live — submit each scenario to EVTE and selective-pull the validation
@@ -23,7 +23,7 @@ notes bulk/CHRP certification is the requirement) and reported as skipped.
 Agent scenarios are skipped in live mode unless AS4_AGENT=1: Example is a
 self-lodger product.
 =#
-@use "../SBR.jl" Env sts endpoints SERVICES business_party agent_party ato_party
+@use "../SBR.jl" Env sts endpoints SERVICES business_party agent_party wpn_party ato_party payevnt_message
 @use "../ebMS3.jl" UserMessage Part envelope secure! push pull Receipt EbMSError TransportError
 @use "../XMLSig.jl" verify load_pem_keypair
 @use "../WSTrust.jl" issue_token
@@ -31,7 +31,7 @@ self-lodger product.
 @use Dates: now, UTC, format, @dateformat_str
 @use Test...
 
-const suite = expanduser(get(ENV, "AS4_SUITE", "~/Desktop/SBR-conformance/payevnt-suite/inner"))
+const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const live = get(ENV, "AS4_LIVE", "") == "1"
 const only = get(ENV, "AS4_SCENARIO", "")
 
@@ -100,18 +100,13 @@ manifest() = begin
 end
 
 payload(path) = Vector{UInt8}(fill_dates(read(path, String)))
-part(path) = Part(payload(path); name=occursin("PAYEVNTEMP", basename(path)) ? "PAYEVNTEMP" : "PAYEVNT", doctype="BASE")
 
 message(s::Submission; product_id=get(ENV, "AS4_PRODUCT_ID", "")) = begin
-  svc = SERVICES[Symbol(:payevnt_, lowercase(s.action))]
-  properties = ["BMS Vendor" => "Example", "BMS Name" => "Example", "BMS Version" => "0.1.0"]
-  isempty(product_id) || pushfirst!(properties, "ProductID" => product_id)
   from = s.agent_tan !== nothing ? agent_party(s.agent_tan) :
-         s.wpn ? (s.abn, "http://ato.gov.au/PartyIdType/WPN", "http://sbr.gov.au/ato/Role/Business") :
-         business_party(s.abn)
-  UserMessage(
-    from=from, to=ato_party(), service=svc.service, action=svc.action,
-    properties=properties, parts=[part(s.parent); part.(s.children)])
+         s.wpn ? wpn_party(s.abn) : business_party(s.abn)
+  payevnt_message(payload(s.parent), payload.(s.children);
+    kind=Symbol(lowercase(s.action)), from=from, product_id=product_id,
+    bms=("Example", "Example", "0.1.0"))
 end
 
 subs, skipped = manifest()
@@ -124,11 +119,13 @@ if !live
   # Offline: every submission assembles into a locally-verifiable signed message.
   pair = load_pem_keypair(joinpath(@__DIR__, "fixtures/key.pem"), joinpath(@__DIR__, "fixtures/cert.pem"))
   @testset "assemble + sign + verify: $(s.scenario) $(s.action) #$(s.n)" for s in subs
-    msg = message(s; product_id="OFFLINE")
+    msg, ids = message(s; product_id="OFFLINE")
     doc, atts = envelope(msg)
     secure!(doc, atts, pair)
     @test verify(doc; cert=pair.cert_der, attachments=Dict(atts))
-    @test length(msg.parts) == 1 + length(s.children)
+    # One delimited attachment for the whole transmission, one DocumentID per document.
+    @test length(msg.parts) == 1
+    @test length(ids) == 1 + length(s.children)
   end
   println("\n$(length(subs)) submissions across $(length(unique(s.scenario for s in subs))) scenarios assembled and verified offline.")
 else
@@ -152,7 +149,7 @@ else
       Base.push!(results, (label, "skipped (WPN payer — EVTE keystore has no matching credential)")); continue
     end
     cred, token = credential(lodging_abn(s))
-    msg = message(s)
+    msg, _ = message(s)
     @info "pushing" label lodging = lodging_abn(s) msg.message_id
     r = try
       push(eps.bulk_push, msg; cred=cred, assertion=token.assertion)
