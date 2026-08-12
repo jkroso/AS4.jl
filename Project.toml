@@ -1,3 +1,10 @@
+name = "AS4"
+uuid = "0a51fbf9-a255-4e92-9580-43fbca68a3f1"
+version = "0.1.0"
+authors = ["Jake Rosoman <jkroso@gmail.com>"]
+license = "MIT"
+description = "ebMS 3.0 / AS4 client for the Australian Taxation Office SBR2 channel"
+
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"

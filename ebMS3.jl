@@ -300,7 +300,12 @@ pull_envelope(ref::AbstractString; timestamp=now(UTC)) = parsexml(
 "Base delay for the exchange retry backoff; doubles each attempt."
 const RETRY_BACKOFF = Ref(0.5)
 
-"POST a secured doc and parse the reply. Transport failures retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
+# Gateway / reverse-proxy shedding: the request never reached the MSH. Retry
+# with the same MessageId (reception awareness). HTTP 500 is *not* here —
+# ebMS3 error signals commonly ride a 500 and must be parsed, not retried.
+retryable_status(status::Integer) = status == 502 || status == 503 || status == 504
+
+"POST a secured doc and parse the reply. Transport failures and gateway 502/503/504 retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
 exchange(url, doc, attachments; retries=2) = begin
   body, ctype = wire(doc, attachments)
   local status, headers, rbody
@@ -308,6 +313,11 @@ exchange(url, doc, attachments; retries=2) = begin
   while true
     try
       status, headers, rbody = post(url, body, ctype)
+      if retryable_status(status) && attempt < retries
+        attempt += 1
+        sleep(RETRY_BACKOFF[] * 2.0^(attempt - 1))
+        continue
+      end
       break
     catch e
       (e isa TransportError && attempt < retries) || rethrow()
@@ -320,11 +330,22 @@ exchange(url, doc, attachments; retries=2) = begin
   parse_response(rbody, get(headers, "content-type", "application/soap+xml"); status=status)
 end
 
-"One-Way/Push: send a UserMessage, expect a Receipt (or an EbMSError)."
-push(url, msg::UserMessage; cred, assertion=nothing, retries=2) = begin
+"""
+One-Way/Push: send a UserMessage, expect a Receipt (or an EbMSError).
+
+When the receipt carries NonRepudiationInformation digests, they are checked
+against the message we just signed (`receipt_covers`). Empty NRI is accepted —
+some gateways omit it. Pass `verify_receipt=false` to skip the check.
+"""
+push(url, msg::UserMessage; cred, assertion=nothing, retries=2, verify_receipt=true) = begin
   doc, atts = envelope(msg)
   secure!(doc, atts, cred, assertion)
-  exchange(url, doc, atts; retries=retries)
+  r = exchange(url, doc, atts; retries=retries)
+  if verify_receipt && r isa Receipt && !isempty(r.digests) && !receipt_covers(r, doc)
+    throw(TransportError(
+      "receipt NonRepudiationInformation digests do not match the message we sent"))
+  end
+  r
 end
 
 """

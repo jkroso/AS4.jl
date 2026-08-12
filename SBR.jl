@@ -163,15 +163,31 @@ token_cache(env, cred::Credential) = lock(CACHES_LOCK) do
 end
 
 """
+Which MEP a service URI uses, from the `SERVICES` registry.
+
+`:bulk` → BulkBatch-async-push; anything else → Single-sync. Unknown service
+URIs default to `:sync` so a typo still hits a single-sync endpoint rather than
+the bulk channel (which would reject a non-delimited payload).
+"""
+mep_for(service::AbstractString) = begin
+  for (_, svc) in SERVICES
+    svc.service == service && return svc.mep
+  end
+  :sync
+end
+
+"Push URL for a message's service under `env`."
+lodge_url(env, msg::UserMessage) =
+  mep_for(msg.service) == :bulk ? endpoints(env).bulk_push : endpoints(env).single_sync
+
+"""
 High-level lodgment: token (cached) → push → Receipt. For bulk services the
 business response arrives later via `collect_response`.
 """
 lodge(env, cred::Credential, msg::UserMessage; cache=token_cache(env, cred), retries=2) = begin
   s = sts(env)
   token = current_token(cache, cred, s.url, s.applies_to)
-  # pay events are Bulk-Async; everything else (incl. payevntrecon list) is Single-Sync
-  url = occursin("/payevnt/", msg.service) ? endpoints(env).bulk_push : endpoints(env).single_sync
-  push(url, msg; cred=cred, assertion=token.assertion, retries=retries)
+  push(lodge_url(env, msg), msg; cred=cred, assertion=token.assertion, retries=retries)
 end
 
 "Selective-pull the response to an earlier push. `nothing` = not ready yet, poll again."

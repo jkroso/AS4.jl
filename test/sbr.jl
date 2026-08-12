@@ -1,4 +1,4 @@
-@use "../SBR.jl" Env endpoints sts payevnt_message as_message service_message bulk_payload business_party agent_party token_cache ATO_ABN
+@use "../SBR.jl" Env endpoints sts payevnt_message as_message service_message bulk_payload business_party agent_party token_cache mep_for lodge_url ATO_ABN
 @use "../Keystore.jl" load
 @use Test...
 
@@ -68,6 +68,22 @@ end
   @test token_cache(Env.EVTE, cred) !== token_cache(Env.PROD, cred)
   other = load(joinpath(@__DIR__, "fixtures/keystore-usi.xml"), "Password1!"; id="ABRD:27809366375_USIMachine")
   @test token_cache(Env.EVTE, cred) !== token_cache(Env.EVTE, other)
+end
+
+@testset "lodge URL follows SERVICES mep, not service-URI substrings" begin
+  # payevntrecon's service URI *contains* "payevnt" — the old occursin check
+  # would have sent recon to bulk_push. Route by the registry mep instead.
+  pay, _ = payevnt_message(UInt8[], []; abn="1", product_id="X", bms=("C","C","1"))
+  as = as_message(:submit, UInt8[]; abn="1", product_id="X", bms=("C","C","1"))
+  recon = service_message(:payevntrecon_list, UInt8[]; abn="1", product_id="X", bms=("C","C","1"))
+  @test mep_for(pay.service) == :bulk
+  @test mep_for(as.service) == :sync
+  @test mep_for(recon.service) == :sync
+  @test mep_for("http://sbr.gov.au/ato/unknown/2099") == :sync
+  @test lodge_url(Env.EVTE, pay) == endpoints(Env.EVTE).bulk_push
+  @test lodge_url(Env.EVTE, as) == endpoints(Env.EVTE).single_sync
+  @test lodge_url(Env.EVTE, recon) == endpoints(Env.EVTE).single_sync
+  @test lodge_url(Env.PROD, pay) == endpoints(Env.PROD).bulk_push
 end
 
 @testset "AS message shape" begin

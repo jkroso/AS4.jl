@@ -154,17 +154,16 @@ OpenSSL.jl's internals rather than their public APIs, so the upper bounds in
 | Verifier accepts real third-party AS4 stacks | signed captures from Governikus + helger access points verify |
 | ABR machine-credential keystore decrypts | official ATO public EVTE keystore (real, expired) loads + signs |
 | WS-Trust RST accepted by the real ATO STS | **live EVTE exchange**: the STS parsed our envelope and reached certificate-path validation, objecting only that the public test credential expired in 2024 (E2169). Token issuance pending a current credential. |
-| MEP behaviour (push/receipt, empty-MPC pull, MessageId-stable retry) | mock-peer tests |
+| MEP behaviour (push/receipt, empty-MPC pull, MessageId-stable retry, 503 retry) | mock-peer tests |
 | SwA attachment signing | self-verify + structure; WSS4J oracle written but unrun (no JVM here) |
 | PAYEVNT.0004 suite assembles | all 25 submissions across 19 BULK scenarios build, sign and self-verify offline |
 | PAYEVNT.0004 suite scores 21/21 | business Error.Code multiset vs the suite's expected responses, from a prior live EVTE run |
+| Receipt NRI digests | checked against the signed message by default when the receipt carries digests |
 | EVTE end-to-end lodgment | pending DSP registration (test credential + endpoint access) |
 
 Known gaps, deliberate: BRRP BATCH scenarios are not implemented (bulk/CHRP is
 the certification requirement); WPN payer scenarios can't run against the public
-EVTE keystore, which has no matching credential; no XML Encryption; receipts are
-parsed but their NonRepudiationInformation digests are not checked against what
-was sent.
+EVTE keystore, which has no matching credential; no XML Encryption. License: MIT.
 
 ## References
 

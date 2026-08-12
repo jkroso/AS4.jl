@@ -86,3 +86,47 @@ end
   @test_throws TransportError push(url, mkmsg(); cred=pair, retries=1)
   close(server)
 end
+
+@testset "gateway 503 is retried with the same MessageId" begin
+  # 502/503/504 mean the request never reached the MSH. Retry with reception
+  # awareness. HTTP 500 is *not* retried — ebMS errors ride a 500.
+  seen = String[]
+  n = Ref(0)
+  server, url = serve(body -> begin
+    Base.push!(seen, reqid(body))
+    n[] += 1
+    n[] == 1 ? (503, "text/plain", "Service Unavailable") :
+               (200, "application/soap+xml", receipt_for(reqid(body)))
+  end)
+  r = push(url, mkmsg(); cred=pair)
+  @test r isa Receipt
+  @test length(seen) == 2 && seen[1] == seen[2]
+  close(server)
+end
+
+@testset "HTTP 500 with an ebMS body is not retried" begin
+  # A gateway that returns an Error signal with status 500 must surface the
+  # signal once — not thrash three identical posts against a permanent reject.
+  seen = Ref(0)
+  server, url = serve(body -> begin
+    seen[] += 1
+    (500, "application/soap+xml", empty_mpc())
+  end)
+  @test push(url, mkmsg(); cred=pair) isa EbMSError
+  @test seen[] == 1
+  close(server)
+end
+
+@testset "receipt NRI digests are checked against what we sent" begin
+  # A receipt whose digests do not match is not acceptance.
+  server, url = serve(body -> begin
+    id = reqid(body)
+    nri = """<S12:Envelope xmlns:S12="$S12"><S12:Header><eb:Messaging xmlns:eb="$EB"><eb:SignalMessage><eb:MessageInfo><eb:Timestamp>2026-06-11T00:00:00.000Z</eb:Timestamp><eb:MessageId>r-$id</eb:MessageId><eb:RefToMessageId>$id</eb:RefToMessageId></eb:MessageInfo><eb:Receipt xmlns:ebbp="http://docs.oasis-open.org/ebxml-bp/ebbp-signals-2.0" xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ebbp:NonRepudiationInformation><ebbp:MessagePartNRInformation><ds:Reference URI="#soapbody"><ds:DigestValue>AAAA</ds:DigestValue></ds:Reference></ebbp:MessagePartNRInformation></ebbp:NonRepudiationInformation></eb:Receipt></eb:SignalMessage></eb:Messaging></S12:Header><S12:Body/></S12:Envelope>"""
+    (200, "application/soap+xml", nri)
+  end)
+  @test_throws TransportError push(url, mkmsg(); cred=pair)
+  # opt-out still returns the bad receipt for callers that want to inspect it
+  r = push(url, mkmsg(); cred=pair, verify_receipt=false)
+  @test r isa Receipt && !isempty(r.digests)
+  close(server)
+end
