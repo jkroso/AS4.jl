@@ -10,8 +10,8 @@
 // this can. Run: jbang Wss4jVerify.java <mime-dump-file>
 //
 // Exit 0 = every signature reference (incl. attachments) verified.
-// UNRUN AS AT 2026-06-11: no JVM on the dev machine. First run pending; treat
-// as a recipe that may need a tweak, not a proven artefact.
+// Drive via `julia --project=. test/oracle_wss4j.jl` (skips if jbang is absent)
+// or: jbang test/oracle/Wss4jVerify.java /path/to/wire.mime
 
 import jakarta.mail.internet.MimeMultipart;
 import jakarta.mail.util.ByteArrayDataSource;

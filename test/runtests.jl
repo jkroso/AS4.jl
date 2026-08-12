@@ -1,5 +1,5 @@
 # Each file runs in its own process (they define overlapping test helpers).
-const files = ["xmlsig.jl", "keystore.jl", "mime.jl", "ebms3.jl", "interop.jl", "meps.jl", "wstrust.jl", "sbr.jl", "suite_score_test.jl"]
+const files = ["xmlsig.jl", "keystore.jl", "mime.jl", "ebms3.jl", "interop.jl", "meps.jl", "wstrust.jl", "sbr.jl", "suite_score_test.jl", "oracle_wss4j.jl"]
 failed = String[]
 for f in files
   println("\n━━ $f")

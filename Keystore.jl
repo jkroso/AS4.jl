@@ -107,7 +107,9 @@ load(path::AbstractString, password::AbstractString; id=nothing, abn=nothing) = 
     cred["id"], field("abn"), field("legalName"), serial, field("notAfter"),
     certs[leaf].der, [c.der for c in certs],
     decrypt_pkcs8(b64(field("protectedPrivateKey")), password))
-  expired(credential) && @warn "machine credential has expired — the STS will refuse it (E2169)" abn=credential.abn not_after=credential.not_after
+  # Load still succeeds so offline inspection and fixture tests can open an
+  # aged keystore. Live paths call `require_valid!` before talking to the STS.
+  expired(credential) && @warn "machine credential has expired — lodge/issue_token will refuse it (STS E2169)" abn=credential.abn not_after=credential.not_after
   credential
 end
 
@@ -134,3 +136,23 @@ rejects an expired credential with E2169, which reads like a protocol problem
 and isn't one.
 """
 expired(c::Credential, at::DateTime=now(UTC)) = (e = expires_at(c); e !== nothing && e < at)
+
+"Raised when a live STS/MSH call is attempted with a past-`notAfter` credential."
+struct ExpiredCredential <: Exception
+  abn::String
+  not_after::String
+end
+Base.showerror(io::IO, e::ExpiredCredential) =
+  print(io, "ExpiredCredential abn=$(e.abn) not_after=$(e.not_after): ",
+        "renew the machine credential in RAM — the STS will answer E2169")
+
+"""
+Refuse an expired machine credential before any network call.
+
+`load` only warns so fixtures and renewal UX can still open aged keystores.
+`issue_token` / `lodge` call this unless `allow_expired=true`.
+"""
+require_valid!(c::Credential, at::DateTime=now(UTC)) = begin
+  expired(c, at) && throw(ExpiredCredential(c.abn, c.not_after))
+  nothing
+end

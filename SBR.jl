@@ -183,16 +183,23 @@ lodge_url(env, msg::UserMessage) =
 """
 High-level lodgment: token (cached) → push → Receipt. For bulk services the
 business response arrives later via `collect_response`.
+
+`allow_expired` is passed to the STS path; `response_cert` / `response_require`
+to the MSH path (see `push`).
 """
-lodge(env, cred::Credential, msg::UserMessage; cache=token_cache(env, cred), retries=2) = begin
+lodge(env, cred::Credential, msg::UserMessage; cache=token_cache(env, cred), retries=2,
+      allow_expired=false, response_cert=nothing, response_require=nothing, verify_receipt=true) = begin
   s = sts(env)
-  token = current_token(cache, cred, s.url, s.applies_to)
-  push(lodge_url(env, msg), msg; cred=cred, assertion=token.assertion, retries=retries)
+  token = current_token(cache, cred, s.url, s.applies_to; allow_expired=allow_expired)
+  push(lodge_url(env, msg), msg; cred=cred, assertion=token.assertion, retries=retries,
+       response_cert=response_cert, response_require=response_require, verify_receipt=verify_receipt)
 end
 
 "Selective-pull the response to an earlier push. `nothing` = not ready yet, poll again."
-collect_response(env, cred::Credential, ref::AbstractString; cache=token_cache(env, cred)) = begin
+collect_response(env, cred::Credential, ref::AbstractString; cache=token_cache(env, cred),
+                 allow_expired=false, response_cert=nothing, response_require=nothing) = begin
   s = sts(env)
-  token = current_token(cache, cred, s.url, s.applies_to)
-  pull(endpoints(env).bulk_pull, ref; cred=cred, assertion=token.assertion)
+  token = current_token(cache, cred, s.url, s.applies_to; allow_expired=allow_expired)
+  pull(endpoints(env).bulk_pull, ref; cred=cred, assertion=token.assertion,
+       response_cert=response_cert, response_require=response_require)
 end

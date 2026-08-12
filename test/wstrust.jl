@@ -1,6 +1,7 @@
 @use "../WSTrust.jl" rst parse_rstr parse_expires issue_token Token TokenCache current_token STSFault WST WSA
 @use "../XMLSig.jl" verify load_pem_keypair S12 WSU WSSE DS SAML2
-@use "../Keystore.jl" load
+@use "../Keystore.jl" load ExpiredCredential
+@use "../ebMS3.jl" TransportError
 @use EzXML: parsexml, root
 @use Dates: DateTime, Minute, now, UTC
 @use Test...
@@ -76,11 +77,16 @@ end
   end
 end
 
+@testset "issue_token refuses expired credentials before the network" begin
+  cred = load(joinpath(@__DIR__, "fixtures/keystore-usi.xml"), "Password1!")
+  # No STS call — ExpiredCredential surfaces instead of a remote E2169.
+  @test_throws ExpiredCredential issue_token(cred, "https://sts.invalid", "https://applies.invalid")
+end
+
 if get(ENV, "AS4_LIVE", "") == "1"
-  # Defaults to the public USI test keystore (expired 2024 → expect an STSFault).
-  # Point AS4_KEYSTORE/AS4_PASSWORD at a real RAM machine credential to test token
-  # issuance proper. AS4_STS picks the target: "evte" (default) or "prod" — a
-  # production credential authenticates against the PROD STS.
+  # Defaults to the public USI test keystore (expired 2024). With a current
+  # credential, point AS4_KEYSTORE/AS4_PASSWORD at a real RAM machine cert.
+  # AS4_STS picks the target: "evte" (default) or "prod".
   keystore = get(ENV, "AS4_KEYSTORE", joinpath(@__DIR__, "fixtures/keystore-usi.xml"))
   password = get(ENV, "AS4_PASSWORD", "Password1!")
   expired_default = !haskey(ENV, "AS4_KEYSTORE")
@@ -90,15 +96,21 @@ if get(ENV, "AS4_LIVE", "") == "1"
   @testset "LIVE: STS smoke ($sts_url)" begin
     cred = load(keystore, password)
     @info "credential" cred.abn cred.legal_name cred.not_after
-    try
+    if expired_default
+      # Prove the local hard-fail, then reach the STS with the override so the
+      # envelope shape is still exercised against the real endpoint.
+      @test_throws ExpiredCredential issue_token(cred, sts_url, applies_to)
+      try
+        issue_token(cred, sts_url, applies_to; allow_expired=true)
+        @test false  # expired public fixture must not mint a token
+      catch e
+        @info "STS replied (allow_expired)" e
+        @test e isa STSFault || e isa TransportError
+      end
+    else
       t = issue_token(cred, sts_url, applies_to)
       @info "STS issued a token" expires = t.expires proof_key_bytes = length(t.proof_key)
       @test t isa Token
-    catch e
-      # an STSFault still proves transport + envelope shape reached the STS proper
-      @info "STS replied with a fault" e
-      @test e isa STSFault
-      @test expired_default  # with a real credential a fault is a failure
     end
   end
 end

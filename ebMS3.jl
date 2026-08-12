@@ -1,5 +1,5 @@
 @use "github.com/jkroso/Prospects.jl" @struct
-@use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2 sign! graft!
+@use "./XMLSig.jl" DS WSSE WSU S12 EB SAML2 sign! graft! verify
 @use "./MIME.jl" MimePart mime_parse mime_encode
 @use EzXML: parsexml, root, Document, Node
 @use CodecZlib: GzipCompressor, GzipDecompressor
@@ -305,20 +305,22 @@ const RETRY_BACKOFF = Ref(0.5)
 # ebMS3 error signals commonly ride a 500 and must be parsed, not retried.
 retryable_status(status::Integer) = status == 502 || status == 503 || status == 504
 
-"POST a secured doc and parse the reply. Transport failures and gateway 502/503/504 retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
-exchange(url, doc, attachments; retries=2) = begin
-  body, ctype = wire(doc, attachments)
-  local status, headers, rbody
+"""
+POST with connection-failure and 502/503/504 retries. Returns
+`(status, headers, body)` like `post`. Used by both the MSH path and STS
+token issuance so behaviour stays consistent.
+"""
+post_with_retry(url, body, content_type; retries=2) = begin
   attempt = 0
   while true
     try
-      status, headers, rbody = post(url, body, ctype)
+      status, headers, rbody = post(url, body, content_type)
       if retryable_status(status) && attempt < retries
         attempt += 1
         sleep(RETRY_BACKOFF[] * 2.0^(attempt - 1))
         continue
       end
-      break
+      return status, headers, rbody
     catch e
       (e isa TransportError && attempt < retries) || rethrow()
       attempt += 1
@@ -327,7 +329,48 @@ exchange(url, doc, attachments; retries=2) = begin
       sleep(RETRY_BACKOFF[] * 2.0^(attempt - 1))
     end
   end
-  parse_response(rbody, get(headers, "content-type", "application/soap+xml"); status=status)
+end
+
+"""
+Parse the SOAP root of a response and optionally verify its signature with a
+pinned certificate. Multipart attachments are passed through to `verify` for
+cid: references. Throws `TransportError` when the signature is missing or fails.
+
+Only call this when the peer is known to sign responses — ATO EVTE business
+payloads often ride TLS alone and leave `response_cert` unset.
+"""
+check_response_signature(body::Vector{UInt8}, content_type::AbstractString;
+                         cert, require=nothing) = begin
+  parts = try
+    occursin("multipart/related", content_type) ? mime_parse(body, content_type) :
+            [MimePart(String(content_type), body)]
+  catch e
+    throw(TransportError("cannot verify response: unreadable body — $(sprint(showerror, e))"))
+  end
+  isempty(parts) && throw(TransportError("cannot verify response: empty body"))
+  doc = try
+    parsexml(parts[1].bytes)
+  catch e
+    throw(TransportError("cannot verify response: not XML — $(snippet(parts[1].bytes))"))
+  end
+  atts = Dict(p.id => p.bytes for p in parts[2:end])
+  ok = try
+    verify(doc; cert=cert, attachments=atts, require=require)
+  catch e
+    throw(TransportError("inbound response signature check failed — $(sprint(showerror, e))"))
+  end
+  ok || throw(TransportError("inbound response signature failed verification"))
+  doc
+end
+
+"POST a secured doc and parse the reply. Transport failures and gateway 502/503/504 retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
+exchange(url, doc, attachments; retries=2, response_cert=nothing, response_require=nothing) = begin
+  body, ctype = wire(doc, attachments)
+  status, headers, rbody = post_with_retry(url, body, ctype; retries=retries)
+  rctype = get(headers, "content-type", "application/soap+xml")
+  response_cert === nothing ||
+    check_response_signature(rbody, rctype; cert=response_cert, require=response_require)
+  parse_response(rbody, rctype; status=status)
 end
 
 """
@@ -336,11 +379,17 @@ One-Way/Push: send a UserMessage, expect a Receipt (or an EbMSError).
 When the receipt carries NonRepudiationInformation digests, they are checked
 against the message we just signed (`receipt_covers`). Empty NRI is accepted —
 some gateways omit it. Pass `verify_receipt=false` to skip the check.
+
+`response_cert` (DER) optionally verifies the inbound SOAP signature with a
+pinned peer certificate before the receipt is returned. Leave it `nothing`
+unless the peer is known to sign responses.
 """
-push(url, msg::UserMessage; cred, assertion=nothing, retries=2, verify_receipt=true) = begin
+push(url, msg::UserMessage; cred, assertion=nothing, retries=2, verify_receipt=true,
+     response_cert=nothing, response_require=nothing) = begin
   doc, atts = envelope(msg)
   secure!(doc, atts, cred, assertion)
-  r = exchange(url, doc, atts; retries=retries)
+  r = exchange(url, doc, atts; retries=retries, response_cert=response_cert,
+               response_require=response_require)
   if verify_receipt && r isa Receipt && !isempty(r.digests) && !receipt_covers(r, doc)
     throw(TransportError(
       "receipt NonRepudiationInformation digests do not match the message we sent"))
@@ -352,12 +401,15 @@ end
 One-Way/Selective-Pull: ask for the response to `ref`. Returns the pulled
 `UserMessage`, or `nothing` when the channel is empty (EBMS:0006 — keep polling).
 """
-pull(url, ref::AbstractString; cred, assertion=nothing, retries=2) = begin
+pull(url, ref::AbstractString; cred, assertion=nothing, retries=2,
+     response_cert=nothing, response_require=nothing) = begin
   doc = pull_envelope(ref)
   secure!(doc, [], cred, assertion)
-  r = exchange(url, doc, []; retries=retries)
+  r = exchange(url, doc, []; retries=retries, response_cert=response_cert,
+               response_require=response_require)
   r isa EbMSError && isempty_mpc(r) ? nothing : r
 end
 
 "Two-Way/Sync: send a UserMessage, expect the business response in the same HTTP exchange."
-sync_call(url, msg::UserMessage; cred, assertion=nothing, retries=2) = push(url, msg; cred=cred, assertion=assertion, retries=retries)
+sync_call(url, msg::UserMessage; cred, assertion=nothing, retries=2, kwargs...) =
+  push(url, msg; cred=cred, assertion=assertion, retries=retries, kwargs...)

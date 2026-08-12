@@ -1,4 +1,4 @@
-@use "../ebMS3.jl" UserMessage Part envelope secure! parse_response Receipt EbMSError TransportError isempty_mpc sent_digests receipt_covers EB S12 WSU WSSE SAML2
+@use "../ebMS3.jl" UserMessage Part envelope secure! parse_response Receipt EbMSError TransportError isempty_mpc sent_digests receipt_covers check_response_signature wire EB S12 WSU WSSE SAML2
 @use EzXML: eachelement
 @use "../XMLSig.jl" verify load_pem_keypair DS
 @use "../MIME.jl" mime_encode MimePart
@@ -214,4 +214,20 @@ end
                  stdout=buf, stderr=buf))
     @test occursin("Verification status: OK", String(take!(buf)))
   end
+end
+
+@testset "check_response_signature accepts a signed response" begin
+  # Peer-signed inbound wire message: pin the peer cert. Must use the full
+  # multipart (not bare SOAP) because attachment digests are in the signature.
+  msg = mkmsg()
+  doc, atts = envelope(msg)
+  secure!(doc, atts, pair, nothing)
+  body, ctype = wire(doc, atts)
+  check_response_signature(body, ctype; cert=pair.cert_der, require=["ebmessaging", "soapbody"])
+  # Wrong cert must fail.
+  @test_throws TransportError check_response_signature(body, ctype;
+    cert=UInt8[0x30, 0x00], require=["soapbody"])
+  # Unsigned body must fail when a cert is required.
+  bare = Vector{UInt8}("""<s:Envelope xmlns:s="$S12"><s:Header/><s:Body>x</s:Body></s:Envelope>""")
+  @test_throws TransportError check_response_signature(bare, "application/soap+xml"; cert=pair.cert_der)
 end

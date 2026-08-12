@@ -1,6 +1,7 @@
 @use "github.com/jkroso/Prospects.jl" @struct
 @use "./XMLSig.jl" sign! graft! DS WSSE WSU S12 SAML2
-@use "./ebMS3.jl" TransportError post xmlescape X509V3 B64ENC
+@use "./ebMS3.jl" TransportError post_with_retry snippet xmlescape X509V3 B64ENC
+@use "./Keystore.jl" require_valid! expired
 @use EzXML: parsexml, root, Document, Node
 @use Dates: DateTime, now, UTC, Minute, format, @dateformat_str
 @use UUIDs: uuid4
@@ -119,14 +120,27 @@ end
 
 """
 Request a SAML token from the STS. One token covers all SBR services when
-`applies_to` is the platform root (https://sbr.gov.au/services or the test.
+`applies_to` is the platform root (https://sbr.gov.au/services or the test
 variant) — the WIG-recommended scoping.
+
+Refuses an expired machine credential unless `allow_expired=true` (so a local
+`ExpiredCredential` surfaces instead of a cryptic STS E2169). Gateway
+502/503/504 and connection failures retry like the MSH path. Non-SOAP error
+bodies become `TransportError` with the HTTP status and a body snippet; a
+real SOAP Fault is still `STSFault`.
 """
-issue_token(cred, sts_url, applies_to) = begin
+issue_token(cred, sts_url, applies_to; allow_expired=false, retries=2) = begin
+  allow_expired || require_valid!(cred)
   doc = rst(cred, sts_url, applies_to)
   ctype = """application/soap+xml; charset=utf-8; action="$WST/RST/Issue\""""
-  _, _, body = post(sts_url, Vector{UInt8}(string(doc)), ctype)
-  parse_rstr(body)
+  status, _, body = post_with_retry(sts_url, Vector{UInt8}(string(doc)), ctype; retries=retries)
+  try
+    parse_rstr(body)
+  catch e
+    e isa STSFault && rethrow()
+    throw(TransportError(
+      "HTTP $status from STS: $(snippet(body)) — $(sprint(showerror, e))"))
+  end
 end
 
 "How close to expiry a cached token gets before it is replaced."
@@ -145,9 +159,9 @@ mutable struct TokenCache
 end
 TokenCache() = TokenCache(nothing, ReentrantLock())
 
-current_token(cache::TokenCache, cred, sts_url, applies_to) = lock(cache.lock) do
+current_token(cache::TokenCache, cred, sts_url, applies_to; allow_expired=false) = lock(cache.lock) do
   t = cache.token
   (t === nothing || t.expires - now(UTC) < TOKEN_REFRESH) &&
-    (cache.token = issue_token(cred, sts_url, applies_to))
+    (cache.token = issue_token(cred, sts_url, applies_to; allow_expired=allow_expired))
   cache.token
 end

@@ -1,10 +1,19 @@
-# Holodeck B2B loopback peer (manual, unrun)
+# Holodeck B2B loopback peer (manual)
 
-Live push interop against an independent open-source AS4 server. **Not yet
-run** — no JVM/container set up for it on this machine when the library was
-built; the cross-stack evidence so far is the verified Governikus/helger
-captures (`test/interop.jl`) and the live ATO EVTE STS exchange
-(`test/wstrust.jl` with `AS4_LIVE=1`).
+Live push interop against an independent open-source AS4 server. Still a
+**manual** recipe — Holodeck wants a container and a P-Mode tailored to the
+fixture cert, which is outside the default test suite. Cross-stack evidence
+that *is* automated:
+
+| Evidence | Where |
+|---|---|
+| Governikus + helger signed captures verify | `test/interop.jl` |
+| xmlsec1 oracle on our envelopes | `test/xmlsig.jl`, `test/ebms3.jl` (when `xmlsec1` is on PATH) |
+| WSS4J multipart oracle | `test/oracle_wss4j.jl` (when `jbang` is installed) |
+| Live ATO EVTE STS | `test/wstrust.jl` with `AS4_LIVE=1` |
+
+Holodeck remains the only full **live peer MSH** check; run it when you need
+push/receipt against something that is not the ATO.
 
 ## Recipe
 

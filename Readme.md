@@ -124,11 +124,20 @@ verify(doc; cert=pinned_der,                       # a cert you pinned out of ba
 ```
 
 With `cert=nothing` the certificate comes from the document itself, which
-proves only internal consistency. There is no chain building, no CRL, no OCSP —
-inbound authenticity rests on TLS. `signed_uris(doc)` reports coverage if you
-want to decide for yourself. AS4.jl is a client and never verifies inbound
-signatures on your behalf; `parse_response` does not call `verify`.
+proves only internal consistency. There is no chain building, no CRL, no OCSP.
 
+**Inbound path.** By default authenticity still rests on TLS. Two optional
+checks layer on top:
+
+- Receipt NonRepudiationInformation digests vs what we signed (`verify_receipt`,
+  default on when the receipt carries digests).
+- Full inbound SOAP signature with a pinned peer cert:
+  `push(...; response_cert=ato_der, response_require=["…"])` (off unless set —
+  ATO EVTE business responses often do not carry a WS-Security signature).
+
+Expired machine credentials: `load` still opens them (with a warning) so fixtures
+and renewal UX work; `issue_token` / `lodge` refuse with `ExpiredCredential`
+unless `allow_expired=true`.
 ## Tests
 
 ```sh
@@ -159,6 +168,10 @@ OpenSSL.jl's internals rather than their public APIs, so the upper bounds in
 | PAYEVNT.0004 suite assembles | all 25 submissions across 19 BULK scenarios build, sign and self-verify offline |
 | PAYEVNT.0004 suite scores 21/21 | business Error.Code multiset vs the suite's expected responses, from a prior live EVTE run |
 | Receipt NRI digests | checked against the signed message by default when the receipt carries digests |
+| Inbound SOAP signature | optional via `response_cert=` (pinned peer cert) |
+| Expired credential | `ExpiredCredential` before STS; `load` still opens aged fixtures |
+| STS HTTP status / 502–504 retry | same transport retry path as the MSH |
+| WSS4J multipart oracle | `test/oracle_wss4j.jl` when jbang is installed |
 | EVTE end-to-end lodgment | pending DSP registration (test credential + endpoint access) |
 
 Known gaps, deliberate: BRRP BATCH scenarios are not implemented (bulk/CHRP is

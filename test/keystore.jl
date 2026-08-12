@@ -1,4 +1,4 @@
-@use "../Keystore.jl" load Credential expired expires_at
+@use "../Keystore.jl" load Credential expired expires_at require_valid! ExpiredCredential
 @use "../XMLSig.jl" rsa_sign rsa_verify
 @use Dates: DateTime
 @use Test...
@@ -36,4 +36,14 @@ end
   blank = Credential("i", "a", "n", "s", "", UInt8[], Vector{UInt8}[], cred.key)
   @test expires_at(blank) === nothing
   @test !expired(blank)
+end
+
+@testset "require_valid! hard-fails expired credentials" begin
+  # load still opens aged fixtures (warn only); live paths refuse them.
+  cred = load(PATH, PASSWORD)
+  @test_throws ExpiredCredential require_valid!(cred)
+  try require_valid!(cred) catch e
+    @test e isa ExpiredCredential && e.abn == "11000002568"
+  end
+  @test require_valid!(cred, DateTime(2024, 1, 1)) === nothing  # not yet expired at that clock
 end
