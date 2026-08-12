@@ -32,9 +32,23 @@ after a clean checkout.
 AS4 endpoint: `http://127.0.0.1:8080/holodeckb2b/as4`  
 Log: `holodeck.log` · delivered payloads: `hb2b/data/msg_in/`
 
-## Smoke test from AS4.jl
+## Automated test
 
-With Holodeck running:
+```sh
+./start.sh
+julia --project=. test/holodeck_live.jl   # or: test/runtests.jl
+```
+
+| Env | Behaviour |
+|---|---|
+| (default) | Skip if nothing is listening on `:8080` |
+| `AS4_HOLODECK=1` | Require Holodeck — fail if the peer is down |
+| `AS4_HOLODECK_URL=…` | Override the AS4 endpoint (default `http://127.0.0.1:8080/holodeckb2b/as4`) |
+
+When the peer is up the test signs a push, asserts a `Receipt` (and NRI digests
+when present), and checks that a delivery file appears under `hb2b/data/msg_in/`.
+
+## Manual smoke (same traffic as the test)
 
 ```julia
 @use "./ebMS3.jl" UserMessage Part push Receipt
@@ -51,9 +65,6 @@ msg = UserMessage(
 r = push("http://127.0.0.1:8080/holodeckb2b/as4", msg; cred=pair)
 @assert r isa Receipt
 ```
-
-Verified 2026-08-13: signed push → Receipt with NonRepudiationInformation digests;
-payload landed under `hb2b/data/msg_in/`.
 
 ## What setup installs
 
