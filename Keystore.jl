@@ -1,6 +1,7 @@
 @use EzXML: parsexml, root
 @use OpenSSL: libcrypto, EvpPKey, load_legacy_provider
 @use Base64: base64decode
+@use Dates: DateTime, Minute, now, UTC
 
 const CNS = ["c" => "http://auth.abr.gov.au/credential/xsd/SBRCredentialStore"]
 
@@ -43,15 +44,22 @@ cms_certs(der::Vector{UInt8}) = begin
   cms = GC.@preserve der ccall((:d2i_CMS_ContentInfo, libcrypto), Ptr{Cvoid},
     (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Clong), C_NULL, pp, length(der))
   cms == C_NULL && error("publicCertificate is not a parseable PKCS#7/CMS blob")
-  stack = ccall((:CMS_get1_certs, libcrypto), Ptr{Cvoid}, (Ptr{Cvoid},), cms)
-  stack == C_NULL && error("no certificates in PKCS#7/CMS blob")
-  n = ccall((:OPENSSL_sk_num, libcrypto), Cint, (Ptr{Cvoid},), stack)
-  certs = map(0:n-1) do i
-    x = ccall((:OPENSSL_sk_value, libcrypto), Ptr{Cvoid}, (Ptr{Cvoid}, Cint), stack, i)
-    (der=x509_der(x), serial=x509_serial(x))
+  try
+    stack = ccall((:CMS_get1_certs, libcrypto), Ptr{Cvoid}, (Ptr{Cvoid},), cms)
+    stack == C_NULL && error("no certificates in PKCS#7/CMS blob")
+    try
+      n = ccall((:OPENSSL_sk_num, libcrypto), Cint, (Ptr{Cvoid},), stack)
+      map(0:n-1) do i
+        x = ccall((:OPENSSL_sk_value, libcrypto), Ptr{Cvoid}, (Ptr{Cvoid}, Cint), stack, i)
+        (der=x509_der(x), serial=x509_serial(x))
+      end
+    finally  # get1 hands over a reference of its own
+      ccall((:OPENSSL_sk_pop_free, libcrypto), Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}),
+            stack, cglobal((:X509_free, libcrypto)))
+    end
+  finally
+    ccall((:CMS_ContentInfo_free, libcrypto), Cvoid, (Ptr{Cvoid},), cms)
   end
-  ccall((:CMS_ContentInfo_free, libcrypto), Cvoid, (Ptr{Cvoid},), cms)
-  certs
 end
 
 "Decrypt an encrypted PKCS#8 EncryptedPrivateKeyInfo with a password."
@@ -88,9 +96,41 @@ load(path::AbstractString, password::AbstractString; id=nothing, abn=nothing) = 
   serial = field("serialNumber")
   certs = cms_certs(b64(field("publicCertificate")))
   leaf = Base.findfirst(c -> c.serial == serial, certs)
-  leaf === nothing && (leaf = 1)  # fall back to first cert
-  Credential(
+  if leaf === nothing
+    # The blob holds the issuing CAs as well as the leaf. Signing with one of
+    # those puts the wrong certificate in the BinarySecurityToken, which the
+    # gateway rejects with nothing that points back here.
+    @warn "keystore serialNumber matches no certificate in the chain; using the first" path serial certs=length(certs)
+    leaf = 1
+  end
+  credential = Credential(
     cred["id"], field("abn"), field("legalName"), serial, field("notAfter"),
     certs[leaf].der, [c.der for c in certs],
     decrypt_pkcs8(b64(field("protectedPrivateKey")), password))
+  expired(credential) && @warn "machine credential has expired — the STS will refuse it (E2169)" abn=credential.abn not_after=credential.not_after
+  credential
 end
+
+"""
+`notAfter` as a UTC DateTime, or `nothing` when it is absent or unparseable.
+ABR writes a local offset: `2024-09-12T06:10:21+10:00`.
+"""
+expires_at(c::Credential) = begin
+  m = match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))?$", strip(c.not_after))
+  m === nothing && return nothing
+  try
+    dt = DateTime(m[1])
+    m[2] === nothing && return dt
+    off = Minute(parse(Int, m[3]) * 60 + parse(Int, m[4]))
+    m[2] == "+" ? dt - off : dt + off
+  catch
+    nothing
+  end
+end
+
+"""
+Has the credential passed its `notAfter`? Worth checking before a run: the STS
+rejects an expired credential with E2169, which reads like a protocol problem
+and isn't one.
+"""
+expired(c::Credential, at::DateTime=now(UTC)) = (e = expires_at(c); e !== nothing && e < at)

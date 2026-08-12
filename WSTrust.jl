@@ -95,7 +95,26 @@ parse_rstr(body::Vector{UInt8}) = begin
   Token(
     assertion=assertion,
     proof_key=secret === nothing ? UInt8[] : base64decode(replace(secret.content, r"\s" => "")),
-    expires=expires === nothing ? now(UTC) + Minute(30) : DateTime(replace(strip(expires.content), "Z" => "")))
+    expires=expires === nothing ? now(UTC) + Minute(30) : parse_expires(expires.content))
+end
+
+"""
+An xsd:dateTime as UTC. The STS sends `…Z`, but a numeric offset is equally
+legal and more than three fractional digits are allowed — neither of which
+Julia's `DateTime` string constructor takes. Falls back to the lifetime we
+asked for rather than discarding a token we were just issued.
+"""
+parse_expires(s::AbstractString) = begin
+  m = match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))?$", strip(s))
+  m === nothing && return now(UTC) + Minute(30)
+  try
+    dt = DateTime(m[1] * (m[2] === nothing ? "" : rpad(m[2][1:min(end, 4)], 4, '0')))
+    m[3] === nothing && return dt
+    off = Minute(parse(Int, m[4]) * 60 + parse(Int, m[5]))
+    m[3] == "+" ? dt - off : dt + off
+  catch
+    now(UTC) + Minute(30)
+  end
 end
 
 """
@@ -110,14 +129,25 @@ issue_token(cred, sts_url, applies_to) = begin
   parse_rstr(body)
 end
 
-"Cache wrapper: refresh when within 5 minutes of expiry."
+"How close to expiry a cached token gets before it is replaced."
+const TOKEN_REFRESH = Minute(5)
+
+"""
+Holds the STS token and re-mints it once it is within `TOKEN_REFRESH` of expiry.
+Share one across calls — a token lasts 30 minutes and covers every SBR service,
+so a cache created per call is not a cache. Safe to share between tasks: the
+lock makes check-then-fetch atomic, so concurrent lodgments queue behind one
+STS request instead of each firing their own.
+"""
 mutable struct TokenCache
   token::Union{Token,Nothing}
+  lock::ReentrantLock
 end
-TokenCache() = TokenCache(nothing)
+TokenCache() = TokenCache(nothing, ReentrantLock())
 
-current_token(cache::TokenCache, cred, sts_url, applies_to) = begin
+current_token(cache::TokenCache, cred, sts_url, applies_to) = lock(cache.lock) do
   t = cache.token
-  (t === nothing || t.expires - now(UTC) < Minute(5)) && (cache.token = issue_token(cred, sts_url, applies_to))
+  (t === nothing || t.expires - now(UTC) < TOKEN_REFRESH) &&
+    (cache.token = issue_token(cred, sts_url, applies_to))
   cache.token
 end

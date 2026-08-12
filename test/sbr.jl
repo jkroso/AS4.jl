@@ -1,4 +1,5 @@
-@use "../SBR.jl" Env endpoints sts payevnt_message as_message service_message bulk_payload business_party agent_party ATO_ABN
+@use "../SBR.jl" Env endpoints sts payevnt_message as_message service_message bulk_payload business_party agent_party token_cache ATO_ABN
+@use "../Keystore.jl" load
 @use Test...
 
 @testset "endpoints" begin
@@ -57,6 +58,16 @@ end
   @test payevnt_message(UInt8[], []; kind=:update, abn="1", product_id="X", bms=("C","C","1"))[1].action == "Update.004.00"
   # The bulk services must not be reachable through the single-document path.
   @test_throws ErrorException service_message(:payevnt_submit, UInt8[]; abn="1", product_id="X", bms=("C","C","1"))
+end
+
+@testset "one token cache per credential per environment" begin
+  # `cache=TokenCache()` as a default argument is a fresh cache every call, so
+  # every lodge and every collect_response poll would mint its own assertion.
+  cred = load(joinpath(@__DIR__, "fixtures/keystore-usi.xml"), "Password1!")
+  @test token_cache(Env.EVTE, cred) === token_cache(Env.EVTE, cred)
+  @test token_cache(Env.EVTE, cred) !== token_cache(Env.PROD, cred)
+  other = load(joinpath(@__DIR__, "fixtures/keystore-usi.xml"), "Password1!"; id="ABRD:27809366375_USIMachine")
+  @test token_cache(Env.EVTE, cred) !== token_cache(Env.EVTE, other)
 end
 
 @testset "AS message shape" begin

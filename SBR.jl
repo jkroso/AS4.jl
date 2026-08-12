@@ -146,11 +146,27 @@ end
 "Activity statement interactions: `as_message(:get | :validate | :submit, payload; …)`."
 as_message(kind::Symbol, payload; kwargs...) = service_message(Symbol(:as_, kind), payload; kwargs...)
 
+const CACHES = Dict{Tuple{String,String},TokenCache}()
+const CACHES_LOCK = ReentrantLock()
+
+"""
+The process-wide token cache for one credential against one environment's STS.
+
+A default of `TokenCache()` would be a fresh cache per call, so every `lodge`
+and every `collect_response` would mint its own SAML assertion — and collecting
+a bulk response means polling. One token lasts 30 minutes and covers every SBR
+service, so they share this instead. Pass `cache=TokenCache()` explicitly to
+opt out.
+"""
+token_cache(env, cred::Credential) = lock(CACHES_LOCK) do
+  get!(TokenCache, CACHES, (sts(env).url, cred.id))
+end
+
 """
 High-level lodgment: token (cached) → push → Receipt. For bulk services the
 business response arrives later via `collect_response`.
 """
-lodge(env, cred::Credential, msg::UserMessage; cache=TokenCache(), retries=2) = begin
+lodge(env, cred::Credential, msg::UserMessage; cache=token_cache(env, cred), retries=2) = begin
   s = sts(env)
   token = current_token(cache, cred, s.url, s.applies_to)
   # pay events are Bulk-Async; everything else (incl. payevntrecon list) is Single-Sync
@@ -159,7 +175,7 @@ lodge(env, cred::Credential, msg::UserMessage; cache=TokenCache(), retries=2) = 
 end
 
 "Selective-pull the response to an earlier push. `nothing` = not ready yet, poll again."
-collect_response(env, cred::Credential, ref::AbstractString; cache=TokenCache()) = begin
+collect_response(env, cred::Credential, ref::AbstractString; cache=token_cache(env, cred)) = begin
   s = sts(env)
   token = current_token(cache, cred, s.url, s.applies_to)
   pull(endpoints(env).bulk_pull, ref; cred=cred, assertion=token.assertion)

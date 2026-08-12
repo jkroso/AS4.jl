@@ -44,7 +44,8 @@ products do not exercise registered-agent paths).
 @use Dates: now, UTC, format, @dateformat_str
 @use Test...
 
-const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
+const suite = expanduser(get(ENV, "AS4_SUITE", ""))
+isempty(suite) && error("set AS4_SUITE to the ATO PAYEVNT conformance suite package — licensed material, held outside this repo and deliberately not defaulted")
 const live = get(ENV, "AS4_LIVE", "") == "1"
 const score_only = get(ENV, "AS4_SCORE_ONLY", "") == "1"
 const only = get(ENV, "AS4_SCENARIO", "")

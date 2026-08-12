@@ -77,10 +77,14 @@ mime_parse(body::Vector{UInt8}, content_type::AbstractString) = begin
     next = findbytes(body, sep, from)
     next == 0 && break
     chunk = body[from:next-1]
-    # part body ends with CRLF before the next boundary
     headers, content = splitblock(chunk)
-    while !isempty(content) && (content[end] == UInt8('\n') || content[end] == UInt8('\r'))
+    # RFC 2046: the CRLF before a boundary belongs to the delimiter, so exactly
+    # one comes off. Stripping every trailing CR/LF instead silently truncates
+    # any payload that ends in a newline — including binary attachments whose
+    # last bytes happen to be 0x0D/0x0A.
+    if !isempty(content) && content[end] == UInt8('\n')
       pop!(content)
+      isempty(content) || content[end] != UInt8('\r') || pop!(content)
     end
     id = replace(header(headers, "Content-ID"), r"^<|>$" => "")
     push!(parts, MimePart(header(headers, "Content-Type"), content; id=id))

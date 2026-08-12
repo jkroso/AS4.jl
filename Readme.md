@@ -91,18 +91,43 @@ on the same core later.
 ## Usage
 
 ```julia
-@use "github.com/jkroso/AS4.jl" load lodge collect_response payevnt_message Env
+@use "github.com/jkroso/AS4.jl" load lodge collect_response payevnt_message Env MESSAGE_ID_DOMAIN
+
+MESSAGE_ID_DOMAIN[] = "as4.yourcompany.com.au"          # goes in every eb:MessageId
 
 cred = load("keystore.xml", password)                    # ABR machine credential
-msg = payevnt_message(payevnt_xml; abn="12 345 678 901",
-                      product_id="YOUR_PRODUCT_ID",
-                      bms=("Your Legal Entity", "Your Product Name", "1.0"))
+msg, ids = payevnt_message(payevnt_xml, payevntemp_xmls; abn="12 345 678 901",
+                           product_id="YOUR_PRODUCT_ID",
+                           bms=("Your Legal Entity", "Your Product Name", "1.0"))
 receipt = lodge(Env.EVTE, cred, msg)                     # STS token → signed push → Receipt
 resp = collect_response(Env.EVTE, cred, msg.message_id)  # nothing = poll again later
 ```
 
+`lodge` and `collect_response` share one SAML token per credential per
+environment (`token_cache`), so polling for a bulk response doesn't mint a new
+one each time. Pass `cache=TokenCache()` to opt out.
+
 Lower layers (`c14n`, `sign!`, `verify`, `issue_token`, `push`/`pull`/`sync_call`)
 are importable individually.
+
+### `verify` is a signature check, not an authorization decision
+
+A `true` from `verify` means *some* key signed *the elements that signature
+names*. It does not mean the key is trusted, and it does not mean the signature
+covers the data you are about to read — an attacker holding any signed fragment
+can leave it intact and put their own content elsewhere in the tree (XML
+signature wrapping), and every digest still matches. To rely on a signature:
+
+```julia
+verify(doc; cert=pinned_der,                       # a cert you pinned out of band…
+       require=["ebmessaging", "soapbody"])        # …and every id you will read
+```
+
+With `cert=nothing` the certificate comes from the document itself, which
+proves only internal consistency. There is no chain building, no CRL, no OCSP —
+inbound authenticity rests on TLS. `signed_uris(doc)` reports coverage if you
+want to decide for yourself. AS4.jl is a client and never verifies inbound
+signatures on your behalf; `parse_response` does not call `verify`.
 
 ## Tests
 
@@ -112,9 +137,15 @@ julia --project=. test/xmlsig.jl       # one layer
 ```
 
 Gated extras: `AS4_LIVE=1` enables the live EVTE STS smoke; the xmlsec1 oracle
-test skips when the tool isn't installed.
+test skips when the tool isn't installed. The PAYEVNT conformance runner is not
+part of `runtests.jl` — it drives licensed ATO suite material held outside this
+repo and belongs to the DSP registration work, not to the protocol library.
 
-## Verification status (2026-06-11)
+Verified on Julia 1.12 only. `XMLSig`/`Keystore` ccall through EzXML's and
+OpenSSL.jl's internals rather than their public APIs, so the upper bounds in
+`[compat]` are load-bearing.
+
+## Verification status (2026-08-12)
 
 | Claim | Evidence |
 |---|---|
@@ -125,10 +156,15 @@ test skips when the tool isn't installed.
 | WS-Trust RST accepted by the real ATO STS | **live EVTE exchange**: the STS parsed our envelope and reached certificate-path validation, objecting only that the public test credential expired in 2024 (E2169). Token issuance pending a current credential. |
 | MEP behaviour (push/receipt, empty-MPC pull, MessageId-stable retry) | mock-peer tests |
 | SwA attachment signing | self-verify + structure; WSS4J oracle written but unrun (no JVM here) |
+| PAYEVNT.0004 suite assembles | all 25 submissions across 19 BULK scenarios build, sign and self-verify offline |
+| PAYEVNT.0004 suite scores 21/21 | business Error.Code multiset vs the suite's expected responses, from a prior live EVTE run |
 | EVTE end-to-end lodgment | pending DSP registration (test credential + endpoint access) |
 
-AS.0004 Service/Action URIs are convention-derived — verify against the AS MIG
-before the first EVTE run (marked TODO in `SBR.jl`).
+Known gaps, deliberate: BRRP BATCH scenarios are not implemented (bulk/CHRP is
+the certification requirement); WPN payer scenarios can't run against the public
+EVTE keystore, which has no matching credential; no XML Encryption; receipts are
+parsed but their NonRepudiationInformation digests are not checked against what
+was sent.
 
 ## References
 

@@ -1,4 +1,5 @@
-@use "../ebMS3.jl" UserMessage Part envelope secure! parse_response Receipt EbMSError TransportError isempty_mpc EB S12 WSU WSSE SAML2
+@use "../ebMS3.jl" UserMessage Part envelope secure! parse_response Receipt EbMSError TransportError isempty_mpc sent_digests receipt_covers EB S12 WSU WSSE SAML2
+@use EzXML: eachelement
 @use "../XMLSig.jl" verify load_pem_keypair DS
 @use "../MIME.jl" mime_encode MimePart
 @use EzXML: parsexml, root
@@ -141,6 +142,60 @@ end
   refs = [r["URI"] for r in findall("//ds:Reference", root(doc), ["ds"=>DS])]
   @test !("#assertion" in refs) && "#ebmessaging" in refs
   @test verify(doc; cert=pair.cert_der, attachments=Dict(atts))
+end
+
+@testset "an assertion that already declares xmlns:wsu" begin
+  # The assertion is the STS's XML; we don't control its namespace decls.
+  # Injecting wsu:Id by rewriting the opening tag produced a duplicate
+  # declaration and unparseable XML.
+  msg = mkmsg()
+  doc, atts = envelope(msg)
+  assertion = root(parsexml("""<saml2:EncryptedAssertion xmlns:saml2="$SAML2" xmlns:wsu="$WSU"><xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#">blob</xenc:EncryptedData></saml2:EncryptedAssertion>"""))
+  secure!(doc, atts, pair, assertion)
+  @test (parsexml(string(doc)); true)                  # serializes back to parseable XML
+  @test verify(doc; cert=pair.cert_der, attachments=Dict(atts),
+               require=["ebmessaging", "assertion", "soapbody"])
+  # WIG layout: EncryptedAssertion, then BST, then Signature
+  sec = findfirst("//wsse:Security", root(doc), [ns; "wsse"=>WSSE])
+  @test [n.name for n in eachelement(sec)] == ["EncryptedAssertion", "BinarySecurityToken", "Signature"]
+end
+
+@testset "receipt digests are checkable against what we sent" begin
+  msg = mkmsg()
+  doc, atts = envelope(msg)
+  secure!(doc, atts, pair, nothing)
+  sent = sent_digests(doc)
+  @test haskey(sent, "#soapbody") && haskey(sent, "#ebmessaging")
+  mkreceipt(ds) = Receipt(message_id="r", ref_to_message_id=msg.message_id, digests=ds)
+  @test receipt_covers(mkreceipt(["#soapbody" => sent["#soapbody"]]), doc)
+  @test receipt_covers(mkreceipt(collect(sent)), doc)          # full coverage
+  @test !receipt_covers(mkreceipt(["#soapbody" => "AAAA"]), doc)  # wrong digest
+  @test !receipt_covers(mkreceipt(["#nosuch" => "AAAA"]), doc)    # reference we never sent
+  @test !receipt_covers(mkreceipt(Pair{String,String}[]), doc)    # no NRI corroborates nothing
+end
+
+@testset "attachment references keep wire order" begin
+  msg = UserMessage(from=("1","t","r"), to=("2","t","r"), service="s", action="a",
+    parts=[Part(Vector{UInt8}("one"); cid="aaa@x"), Part(Vector{UInt8}("two"); cid="zzz@x"),
+           Part(Vector{UInt8}("three"); cid="mmm@x")])
+  doc, atts = envelope(msg)
+  secure!(doc, atts, pair, nothing)
+  refs = [r["URI"] for r in findall("//ds:Reference", root(doc), ["ds"=>DS]) if startswith(r["URI"], "cid:")]
+  @test refs == ["cid:$cid" for (cid, _) in atts]   # a Dict would reorder them
+end
+
+@testset "unparseable responses are TransportErrors" begin
+  # A proxy answering with HTML, or nothing at all, must not surface as an XML
+  # library error that callers catching TransportError never see.
+  for (body, ct) in [(Vector{UInt8}("502 Bad Gateway"), "text/plain"),
+                     (UInt8[], "text/html"),
+                     (Vector{UInt8}("<s:Envelope"), "application/soap+xml"),
+                     (Vector{UInt8}("junk"), "multipart/related")]
+    @test_throws TransportError parse_response(body, ct; status=502)
+  end
+  # …and the status reaches the message, since ebMS3 signals arrive with 500s
+  e = try parse_response(Vector{UInt8}("nope"), "text/plain"; status=503) catch e; e end
+  @test occursin("503", e.message)
 end
 
 @testset "xmlsec1 oracle on the secured envelope" begin

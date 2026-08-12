@@ -1,5 +1,6 @@
-@use "../Keystore.jl" load Credential
+@use "../Keystore.jl" load Credential expired expires_at
 @use "../XMLSig.jl" rsa_sign rsa_verify
+@use Dates: DateTime
 @use Test...
 
 # real (expired) EVTE M2M credentials from github.com/ato-pub/usi.cl.java
@@ -22,4 +23,17 @@ end
 
 @testset "wrong password is a clear error" begin
   @test_throws ErrorException load(PATH, "wrong")
+end
+
+@testset "credential expiry is knowable locally" begin
+  # The STS answers an expired credential with E2169, which reads like a
+  # protocol fault and isn't one. These fixtures expired in 2024.
+  cred = load(PATH, PASSWORD)
+  @test expires_at(cred) == DateTime(2024, 9, 11, 20, 10, 21)   # 06:10:21+10:00 → UTC
+  @test expired(cred)
+  @test !expired(cred, DateTime(2024, 1, 1))
+  # absent or malformed notAfter is unknown, not expired
+  blank = Credential("i", "a", "n", "s", "", UInt8[], Vector{UInt8}[], cred.key)
+  @test expires_at(blank) === nothing
+  @test !expired(blank)
 end

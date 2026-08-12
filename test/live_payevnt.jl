@@ -23,7 +23,8 @@ see `bulk_payload` in SBR.jl.
 @use "../Keystore.jl" load
 @use "./suite_fixtures.jl" payload
 
-const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
+const suite = expanduser(get(ENV, "AS4_SUITE", ""))
+isempty(suite) && error("set AS4_SUITE to the ATO PAYEVNT conformance suite package — licensed material, held outside this repo and deliberately not defaulted")
 const scenario = joinpath(suite, "CONF-ATO-PAYEVNT-BULK-001")
 const ABN = "67094544519"  # YALACT P/L — payer in BULK-001, must match the credential entity
 

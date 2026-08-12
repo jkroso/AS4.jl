@@ -54,7 +54,7 @@ fixups(path, xml) = begin
   end
 end
 
-payload(path) = Vector{UInt8}(fillups(path, fill_dates(read(path, String))))
+payload(path) = Vector{UInt8}(fixups(path, fill_dates(read(path, String))))
 
 # ── Response scoring ──────────────────────────────────────────────────────────
 #

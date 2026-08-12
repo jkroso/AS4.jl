@@ -10,6 +10,20 @@
 
 const TSFORMAT = dateformat"yyyy-mm-dd\THH:MM:SS.sss\Z"
 
+"""
+Right-hand side of generated `eb:MessageId`s and Content-IDs. RFC 2822 wants a
+domain the sender actually controls, and the receiving gateway logs it, so set
+it before sending anything:
+
+    MESSAGE_ID_DOMAIN[] = "as4.yourcompany.com.au"
+
+The default is deliberately an RFC 2606 `.invalid` name: a MessageId that
+reaches a gateway still carrying it is a configuration bug you want to notice.
+"""
+const MESSAGE_ID_DOMAIN = Ref("as4.invalid")
+
+newid() = "$(uuid4())@$(MESSAGE_ID_DOMAIN[])"
+
 xmlescape(s) = replace(string(s), '&'=>"&amp;", '<'=>"&lt;", '>'=>"&gt;", '"'=>"&quot;")
 
 "One business payload: raw bytes plus the ebMS PartProperties that describe them."
@@ -18,7 +32,7 @@ xmlescape(s) = replace(string(s), '&'=>"&amp;", '<'=>"&lt;", '>'=>"&gt;", '"'=>"
   name::String = ""          # PartProperty DocumentName, e.g. "PAYEVNT"
   doctype::String = ""       # PartProperty DocumentType: BASE | SCHEDULE
   mime::String = "text/xml"  # of the *uncompressed* document
-  cid::String = "$(uuid4())@as4"
+  cid::String = newid()
 end
 Part(bytes::Union{Vector{UInt8},AbstractString}; kwargs...) = Part(bytes=Vector{UInt8}(bytes); kwargs...)
 
@@ -30,7 +44,7 @@ Part(bytes::Union{Vector{UInt8},AbstractString}; kwargs...) = Part(bytes=Vector{
   action::String
   agreement::Union{String,Nothing} = nothing
   conversation_id::String = string(uuid4())
-  message_id::String = "$(uuid4())@as4.invalid"
+  message_id::String = newid()
   properties::Vector{Pair{String,String}} = Pair{String,String}[]
   parts::Vector{Part} = Part[]
 end
@@ -75,27 +89,34 @@ end
 const X509V3 = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"
 const B64ENC = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
 
-"Serialize an element, injecting wsu:Id on its opening tag (used for the opaque assertion)."
-with_wsu_id(node, id) = replace(string(node), r"^<([^\s>]+)" => SubstitutionString("""<\\1 xmlns:wsu="$WSU" wsu:Id="$id\""""); count=1)
-
 """
 Add the WS-Security header per the SBR ebMS3 profile: an X509 BinarySecurityToken
 (the machine credential), the STS-issued `saml2:EncryptedAssertion` inserted
 verbatim (pass `nothing` before a token is held), and one signature over
 eb:Messaging + assertion + body + every attachment. `cred` needs `.key` +
 `.cert_der` (a `Keystore.Credential` or test keypair).
+
+`attachments` keeps its order in the signature when given as pairs, so the
+ds:Reference sequence matches the order the parts go on the wire.
 """
 secure!(doc::Document, attachments, cred, assertion=nothing) = begin
   header = Base.findfirst("//s:Header", root(doc), RNS)
   header === nothing && error("no SOAP header")
-  bst = """<wsse:BinarySecurityToken EncodingType="$B64ENC" ValueType="$X509V3" wsu:Id="signingCert">$(base64encode(cred.cert_der))</wsse:BinarySecurityToken>"""
-  asrt = assertion === nothing ? "" : with_wsu_id(assertion, "assertion")
+  secnode = graft!(header, root(parsexml(
+    """<wsse:Security xmlns:wsse="$WSSE" xmlns:wsu="$WSU" s:mustUnderstand="true" xmlns:s="$S12"/>""")))
   # WIG sample layout: EncryptedAssertion, then BST, then Signature (strict gateways enforce order)
-  sec = """<wsse:Security xmlns:wsse="$WSSE" xmlns:wsu="$WSU" s:mustUnderstand="true" xmlns:s="$S12">$asrt$bst</wsse:Security>"""
-  secnode = graft!(header, root(parsexml(sec)))
+  if assertion !== nothing
+    # wsu:Id goes on through the DOM. The assertion is the STS's own XML and we
+    # do not control its namespace declarations; rewriting the opening tag by
+    # regex produces a duplicate xmlns:wsu — and unparseable XML — whenever it
+    # already declares one.
+    graft!(secnode, assertion)["wsu:Id"] = "assertion"
+  end
+  graft!(secnode, root(parsexml(
+    """<wsse:BinarySecurityToken xmlns:wsse="$WSSE" xmlns:wsu="$WSU" EncodingType="$B64ENC" ValueType="$X509V3" wsu:Id="signingCert">$(base64encode(cred.cert_der))</wsse:BinarySecurityToken>""")))
   ids = assertion === nothing ? ["ebmessaging", "soapbody"] : ["ebmessaging", "assertion", "soapbody"]
   str = """<ds:KeyInfo><wsse:SecurityTokenReference xmlns:wsse="$WSSE"><wsse:Reference URI="#signingCert" ValueType="$X509V3"/></wsse:SecurityTokenReference></ds:KeyInfo>"""
-  sign!(doc, secnode, ids, cred; attachments=Dict(attachments), keyinfo=str)
+  sign!(doc, secnode, ids, cred; attachments=attachments, keyinfo=str)
   doc
 end
 
@@ -167,20 +188,40 @@ parse_usermessage(um::Node, attachments::Dict{String,Vector{UInt8}}) = begin
     parts=parts)
 end
 
+"A short printable excerpt of a response body, for diagnostics."
+snippet(bytes::Vector{UInt8}, n=200) = begin
+  s = String(copy(bytes[1:min(end, n)]))
+  strip(replace(isvalid(String, s) ? s : repr(bytes[1:min(end, 40)]), r"\s+" => " ")) *
+    (length(bytes) > n ? "…" : "")
+end
+
 """
 Parse a response body into a `Receipt`, `EbMSError`, or `UserMessage`.
-Throws `TransportError` for SOAP faults without an ebMS Messaging header.
+Throws `TransportError` for SOAP faults without an ebMS Messaging header, and
+for bodies that aren't parseable at all — a gateway or proxy that answers with
+HTML or nothing must not surface as an XML library error. `status` is carried
+only for the message: ebMS3 signals legitimately arrive with HTTP 500, so a
+non-2xx body is still parsed before being judged.
 """
-parse_response(body::Vector{UInt8}, content_type::AbstractString) = begin
-  parts = occursin("multipart/related", content_type) ? mime_parse(body, content_type) :
-          [MimePart(String(content_type), body)]
-  isempty(parts) && throw(TransportError("empty response body"))
-  doc = parsexml(parts[1].bytes)
+parse_response(body::Vector{UInt8}, content_type::AbstractString; status=200) = begin
+  at = "HTTP $status"
+  parts = try
+    occursin("multipart/related", content_type) ? mime_parse(body, content_type) :
+            [MimePart(String(content_type), body)]
+  catch e
+    throw(TransportError("$at: unreadable multipart body — $(sprint(showerror, e))"))
+  end
+  isempty(parts) && throw(TransportError("$at: empty response body"))
+  doc = try
+    parsexml(parts[1].bytes)
+  catch e
+    throw(TransportError("$at: response is not XML — $(snippet(parts[1].bytes))"))
+  end
   attachments = Dict(p.id => p.bytes for p in parts[2:end])
   messaging = Base.findfirst("//eb:Messaging", root(doc), RNS)
   if messaging === nothing
     reason = text(root(doc), "//s:Fault//s:Text")
-    throw(TransportError(isempty(reason) ? "no eb:Messaging in response" : "SOAP fault: $reason"))
+    throw(TransportError(isempty(reason) ? "$at: no eb:Messaging in response" : "$at: SOAP fault: $reason"))
   end
   um = Base.findfirst("./eb:UserMessage", messaging, RNS)
   um === nothing || return parse_usermessage(um, attachments)
@@ -198,6 +239,27 @@ parse_response(body::Vector{UInt8}, content_type::AbstractString) = begin
     return Receipt(message_id=info("MessageId"), ref_to_message_id=info("RefToMessageId"), digests=digests)
   end
   throw(TransportError("unrecognised ebMS signal"))
+end
+
+"The digests we signed, `reference URI => DigestValue`, from a secured envelope."
+sent_digests(doc::Document) = Dict(
+  r["URI"] => text(r, "./ds:DigestValue")
+  for r in Base.findall("//ds:Signature/ds:SignedInfo/ds:Reference", root(doc), RNS))
+
+"""
+Does the receipt's NonRepudiationInformation agree with what we sent?
+
+The receipt is the non-repudiation record — it is the ATO restating the digests
+of the message it accepted. Unchecked, it records only that *something* came
+back. True means every digest the receipt reports is one we signed (gateways
+differ in how many they echo, so this does not demand full coverage) and that
+it reports at least one. A receipt carrying no NRI at all can't corroborate
+anything, so it is false.
+"""
+receipt_covers(r::Receipt, doc::Document) = begin
+  isempty(r.digests) && return false
+  sent = sent_digests(doc)
+  all(((uri, dv),) -> get(sent, uri, nothing) == dv, r.digests)
 end
 
 # ── transport + MEPs ──────────────────────────────────────────────────────────
@@ -220,7 +282,7 @@ end
 "Assemble the final wire message: bare SOAP when there are no attachments, else SOAP root part + gzipped attachment parts."
 wire(doc::Document, attachments) = begin
   isempty(attachments) && return Vector{UInt8}(string(doc)), "application/soap+xml; charset=UTF-8"
-  parts = [MimePart("application/soap+xml; charset=UTF-8", Vector{UInt8}(string(doc)); id="root@as4.invalid");
+  parts = [MimePart("application/soap+xml; charset=UTF-8", Vector{UInt8}(string(doc)); id="root@$(MESSAGE_ID_DOMAIN[])");
            [MimePart("application/gzip", bytes; id=cid, headers=["Content-Transfer-Encoding" => "binary"])
             for (cid, bytes) in attachments]]
   mime_encode(parts)
@@ -231,25 +293,31 @@ pull_envelope(ref::AbstractString; timestamp=now(UTC)) = parsexml(
   """<s:Envelope xmlns:s="$S12" xmlns:eb="$EB" xmlns:wsu="$WSU"><s:Header>""" *
   """<eb:Messaging wsu:Id="ebmessaging" s:mustUnderstand="true"><eb:SignalMessage>""" *
   """<eb:MessageInfo><eb:Timestamp>$(format(timestamp, TSFORMAT))</eb:Timestamp>""" *
-  """<eb:MessageId>$(uuid4())@as4.invalid</eb:MessageId></eb:MessageInfo>""" *
+  """<eb:MessageId>$(newid())</eb:MessageId></eb:MessageInfo>""" *
   """<eb:PullRequest><eb:RefToMessageId>$(xmlescape(ref))</eb:RefToMessageId></eb:PullRequest>""" *
   """</eb:SignalMessage></eb:Messaging></s:Header><s:Body wsu:Id="soapbody"/></s:Envelope>""")
+
+"Base delay for the exchange retry backoff; doubles each attempt."
+const RETRY_BACKOFF = Ref(0.5)
 
 "POST a secured doc and parse the reply. Transport failures retry with the SAME message bytes (reception awareness — the server dedups on MessageId)."
 exchange(url, doc, attachments; retries=2) = begin
   body, ctype = wire(doc, attachments)
-  local headers, rbody
+  local status, headers, rbody
   attempt = 0
   while true
     try
-      _, headers, rbody = post(url, body, ctype)
+      status, headers, rbody = post(url, body, ctype)
       break
     catch e
       (e isa TransportError && attempt < retries) || rethrow()
       attempt += 1
+      # An immediate resend hits whatever knocked the first one over; a gateway
+      # shedding load reads three in a row as three messages.
+      sleep(RETRY_BACKOFF[] * 2.0^(attempt - 1))
     end
   end
-  parse_response(rbody, get(headers, "content-type", "application/soap+xml"))
+  parse_response(rbody, get(headers, "content-type", "application/soap+xml"); status=status)
 end
 
 "One-Way/Push: send a UserMessage, expect a Receipt (or an EbMSError)."

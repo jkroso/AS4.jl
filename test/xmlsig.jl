@@ -1,5 +1,6 @@
-@use "../XMLSig.jl" c14n sign! verify load_pem_keypair WSU DS S12
+@use "../XMLSig.jl" c14n sign! verify signed_uris rsa_verify xpath_literal count_id load_pem_keypair WSU DS S12
 @use EzXML: parsexml, root
+@use Base64: base64decode
 @use Test...
 
 const pair = load_pem_keypair(joinpath(@__DIR__, "fixtures/key.pem"), joinpath(@__DIR__, "fixtures/cert.pem"))
@@ -52,6 +53,72 @@ end
   @test verify(doc; cert=pair.cert_der, attachments=att)
   @test !verify(doc; cert=pair.cert_der, attachments=Dict("part1@as4" => UInt8['x']))
   @test !verify(doc; cert=pair.cert_der)  # attachment missing entirely
+end
+
+@testset "a Reference must resolve to exactly one element" begin
+  # A missing Id used to digest the empty node set: a signature that verifies
+  # and covers nothing.
+  doc = soapdoc()
+  @test_throws ErrorException sign!(doc, secnode(doc), ["body", "typo"], pair)
+  # Two elements sharing an Id digest their concatenation, which is not what
+  # "#dup" says.
+  dup = parsexml("""<s:Envelope xmlns:s="$S12" xmlns:wsu="$WSU"><s:Header><sec/></s:Header><s:Body wsu:Id="dup"><x wsu:Id="dup"/></s:Body></s:Envelope>""")
+  @test count_id(dup, "dup") == 2
+  @test_throws ErrorException sign!(dup, findfirst("//sec", root(dup)), ["dup"], pair)
+end
+
+@testset "a signature covering nothing does not verify" begin
+  doc = parsexml("""<r xmlns:ds="$DS"><ds:Signature><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:SignatureMethod Algorithm="$(("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"))"/></ds:SignedInfo><ds:SignatureValue>x</ds:SignatureValue></ds:Signature></r>""")
+  @test verify(doc; cert=pair.cert_der) == false   # `all` over zero refs would say true
+end
+
+@testset "each signature signs its own SignedInfo" begin
+  # `//ds:SignedInfo` picks the first in the document, so a second signature —
+  # or a document that already carries an STS-signed assertion — would get a
+  # SignatureValue over someone else's bytes.
+  doc = parsexml("""<s:Envelope xmlns:s="$S12" xmlns:wsu="$WSU"><s:Header><a wsu:Id="hdr"/><sec/></s:Header><s:Body wsu:Id="body">data</s:Body></s:Envelope>""")
+  sign!(doc, secnode(doc), ["hdr"], pair)
+  sign!(doc, secnode(doc), ["body"], pair)
+  sigs = findall("//ds:Signature", root(doc), ["ds"=>DS])
+  @test length(sigs) == 2
+  si(i) = Vector{UInt8}(c14n(findfirst("./ds:SignedInfo", sigs[i], ["ds"=>DS])))
+  sv(i) = base64decode(findfirst("./ds:SignatureValue", sigs[i], ["ds"=>DS]).content)
+  @test si(1) != si(2)
+  @test rsa_verify(pair.cert_der, si(1), sv(1))
+  @test rsa_verify(pair.cert_der, si(2), sv(2))
+  @test !rsa_verify(pair.cert_der, si(1), sv(2))
+end
+
+@testset "a Reference URI cannot splice into the XPath" begin
+  # URIs in a document we did not write are attacker-supplied.
+  @test xpath_literal("plain") == "\"plain\""
+  @test xpath_literal("it's") == "\"it's\""
+  @test xpath_literal("say \"hi\"") == "concat(\"say \", '\"', \"hi\", '\"', \"\")"
+  doc = soapdoc()
+  sign!(doc, secnode(doc), ["body"], pair)
+  findfirst("//ds:Reference", root(doc), ["ds"=>DS])["URI"] = """#body"] | //*[@wsu:Id=" """
+  @test verify(doc; cert=pair.cert_der) == false
+end
+
+@testset "require= gates on what the signature actually covers" begin
+  doc = soapdoc()
+  sign!(doc, secnode(doc), ["body"], pair)
+  @test signed_uris(doc) == ["#body"]
+  @test verify(doc; cert=pair.cert_der, require=["body"])
+  @test verify(doc; cert=pair.cert_der, require=["#body"])
+  # the header is unsigned — a caller that reads it must not be told otherwise
+  @test !verify(doc; cert=pair.cert_der, require=["body", "hdr"])
+end
+
+@testset "c14n does not leak libxml2 allocations" begin
+  doc = parsexml("""<r xmlns:wsu="$WSU"><x wsu:Id="a">$(repeat("payload ", 200))</x></r>""")
+  for _ in 1:2_000; c14n(doc, """//*[@wsu:Id="a"]"""); end   # warm up
+  GC.gc(); before = Sys.maxrss()
+  for _ in 1:20_000; c14n(doc, """//*[@wsu:Id="a"]"""); end
+  GC.gc()
+  # the canonicalized buffer, XPath context and XPath object all need freeing;
+  # leaking them cost ~3.7 KB a call, unbounded in a long-lived process
+  @test (Sys.maxrss() - before) / 2^20 < 5
 end
 
 @testset "xmlsec1 oracle" begin

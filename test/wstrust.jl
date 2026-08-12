@@ -1,8 +1,8 @@
-@use "../WSTrust.jl" rst parse_rstr issue_token Token STSFault WST WSA
+@use "../WSTrust.jl" rst parse_rstr parse_expires issue_token Token TokenCache current_token STSFault WST WSA
 @use "../XMLSig.jl" verify load_pem_keypair S12 WSU WSSE DS SAML2
 @use "../Keystore.jl" load
 @use EzXML: parsexml, root
-@use Dates: DateTime
+@use Dates: DateTime, Minute, now, UTC
 @use Test...
 
 const pair = load_pem_keypair(joinpath(@__DIR__, "fixtures/key.pem"), joinpath(@__DIR__, "fixtures/cert.pem"))
@@ -40,6 +40,32 @@ end
   @test t.proof_key == UInt8[0xde, 0xad, 0xbe, 0xef]
   @test t.expires == DateTime(2026, 6, 11, 0, 30)
   @test occursin("EncryptedAssertion", string(t.assertion))
+end
+
+@testset "xsd:dateTime lifetimes" begin
+  # An offset or extra fractional digits are legal; throwing on them would
+  # discard a token we were just issued.
+  @test parse_expires("2026-06-11T00:30:00.000Z") == DateTime(2026, 6, 11, 0, 30)
+  @test parse_expires("2026-06-11T00:30:00Z") == DateTime(2026, 6, 11, 0, 30)
+  @test parse_expires(" 2026-06-11T00:30:00.1234567Z ") == DateTime(2026, 6, 11, 0, 30, 0, 123)
+  @test parse_expires("2026-06-11T10:30:00+10:00") == DateTime(2026, 6, 11, 0, 30)   # → UTC
+  @test parse_expires("2026-06-10T19:30:00-05:00") == DateTime(2026, 6, 11, 0, 30)
+  @test parse_expires("not a date") > now(UTC)   # falls back to the lifetime we asked for
+end
+
+@testset "TokenCache reuses a live token" begin
+  # A cache that refetches every call is not a cache: collecting a bulk
+  # response polls, and each poll would mint a fresh SAML assertion.
+  cache = TokenCache()
+  cache.token = Token(assertion=root(parsexml("<a/>")), proof_key=UInt8[],
+                      expires=now(UTC) + Minute(20))
+  t1 = current_token(cache, pair, "https://sts.invalid", "https://applies.invalid")
+  t2 = current_token(cache, pair, "https://sts.invalid", "https://applies.invalid")
+  @test t1 === t2   # no STS request — an attempt would have thrown
+  # inside the refresh window it goes back to the STS (which is unreachable here)
+  cache.token = Token(assertion=root(parsexml("<a/>")), proof_key=UInt8[],
+                      expires=now(UTC) + Minute(2))
+  @test_throws Exception current_token(cache, pair, "https://sts.invalid", "https://applies.invalid")
 end
 
 @testset "STS fault → STSFault" begin

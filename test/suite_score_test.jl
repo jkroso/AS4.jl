@@ -47,10 +47,12 @@ end
   @test ok
 end
 
-# Optional: re-score a real suite results/ tree when present (maintainer machine).
-const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
-const results = joinpath(dirname(suite), "results")
-if isdir(suite) && isdir(results)
+# Optional: re-score a real suite results/ tree. The suite package is licensed
+# ATO material held outside this repo, so there is no default path — point
+# AS4_SUITE at one explicitly or this block stays dormant.
+const suite = expanduser(get(ENV, "AS4_SUITE", ""))
+const results = isempty(suite) ? "" : joinpath(dirname(suite), "results")
+if !isempty(suite) && isdir(suite) && isdir(results)
   @testset "existing results score 21/21 against suite expected" begin
     npass = nfail = 0
     for dir in sort(readdir(results; join=true))

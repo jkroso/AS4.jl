@@ -16,6 +16,18 @@ fixture(name) = read(joinpath(@__DIR__, "fixtures/phase4", name))
   @test startswith(parts[2].mime, "application/gzip")
 end
 
+@testset "payload bytes survive a round trip exactly" begin
+  # Only the single CRLF that delimits the boundary comes off. Stripping every
+  # trailing CR/LF truncates any payload ending in a newline — including binary
+  # attachments whose last bytes happen to be 0x0D/0x0A.
+  for payload in [Vector{UInt8}("hello\n\n"), UInt8[0x1f, 0x8b, 0x08, 0x00, 0x0d, 0x0a],
+                  Vector{UInt8}("x\r\n"), UInt8[0x0a], UInt8[0x0d], UInt8[], Vector{UInt8}("plain")]
+    body, ctype = mime_encode([MimePart("application/soap+xml", Vector{UInt8}("<a/>"); id="root"),
+                               MimePart("application/gzip", payload; id="p1")])
+    @test mime_parse(body, ctype)[2].bytes == payload
+  end
+end
+
 @testset "parse a real phase4 outbound capture (CRLF)" begin
   parts = parse_dump(fixture("dump-raw.as4out"))
   @test length(parts) >= 2
