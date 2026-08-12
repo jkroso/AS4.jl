@@ -36,13 +36,16 @@ end
 
 @testset "payevnt message shape" begin
   msg, ids = payevnt_message(Vector{UInt8}("<PAYEVNT/>"), [Vector{UInt8}("<PAYEVNTEMP/>")];
-    abn="12345678901", product_id="ABC123", bms=("Example", "Example", "1.0"))
+    abn="12345678901", product_id="ABC123", bms=("Example Vendor", "Example Payroll", "1.0"))
   @test msg.service == "http://sbr.gov.au/ato/payevnt/2020"
   @test msg.action == "Submit.004.00"
   @test msg.to == (ATO_ABN, "http://abr.gov.au/PartyIdType/ABN", "http://sbr.gov.au/agency")
   @test msg.from[1] == "12345678901" && msg.from[3] == "http://sbr.gov.au/ato/Role/Business"
   props = Dict(msg.properties)
-  @test props["ProductID"] == "ABC123" && props["BMS Vendor"] == "Example" && props["BMS Version"] == "1.0"
+  @test props["ProductID"] == "ABC123"
+  @test props["BMS Vendor"] == "Example Vendor"
+  @test props["BMS Name"] == "Example Payroll"
+  @test props["BMS Version"] == "1.0"
   # One attachment for the whole transmission — both documents live inside it.
   @test length(msg.parts) == 1 && msg.parts[1].name == "PAYEVNT"
   @test msg.parts[1].doctype == "BASE"  # EVTE rejects a bulk push without one

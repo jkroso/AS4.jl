@@ -95,7 +95,8 @@ on the same core later.
 
 cred = load("keystore.xml", password)                    # ABR machine credential
 msg = payevnt_message(payevnt_xml; abn="12 345 678 901",
-                      product_id=SBR_PRODUCT_ID, bms=("Example","Example","1.0"))
+                      product_id="YOUR_PRODUCT_ID",
+                      bms=("Your Legal Entity", "Your Product Name", "1.0"))
 receipt = lodge(Env.EVTE, cred, msg)                     # STS token → signed push → Receipt
 resp = collect_response(Env.EVTE, cred, msg.message_id)  # nothing = poll again later
 ```

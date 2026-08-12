@@ -12,7 +12,8 @@ whole suite without touching the network.
 Live — submit each scenario to EVTE and selective-pull the validation
 response, saving what comes back next to the suite's expected responses:
 
-  AS4_LIVE=1 AS4_KEYSTORE=… AS4_PASSWORD=… [AS4_PRODUCT_ID=…] \
+  AS4_LIVE=1 AS4_KEYSTORE=… AS4_PASSWORD=… AS4_PRODUCT_ID=… \
+  AS4_BMS_VENDOR=… AS4_BMS_NAME=… [AS4_BMS_VERSION=1.0] \
   [AS4_SCENARIO=BULK-001] [AS4_AGENT=1] [AS4_POLL_SECS=150] \
   julia --project=. test/conformance_payevnt.jl
 
@@ -34,6 +35,14 @@ self-lodger product.
 const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const live = get(ENV, "AS4_LIVE", "") == "1"
 const only = get(ENV, "AS4_SCENARIO", "")
+
+# BMS MessageProperties must match the DSP's OS4DSP registration (Software
+# Vendor Name / Product Name in EVTE logs). Supply via env for live runs —
+# never hard-code a real DSP's identity in this open-source package.
+bms_from_env() = (
+  get(ENV, "AS4_BMS_VENDOR", "Example Vendor"),
+  get(ENV, "AS4_BMS_NAME", "Example Payroll"),
+  get(ENV, "AS4_BMS_VERSION", "1.0"))
 
 
 first_match(re, s) = (m = match(re, s); m === nothing ? nothing : m[1])
@@ -98,7 +107,7 @@ message(s::Submission; product_id=get(ENV, "AS4_PRODUCT_ID", "")) = begin
          s.wpn ? wpn_party(s.abn) : business_party(s.abn)
   payevnt_message(payload(s.parent), payload.(s.children);
     kind=Symbol(lowercase(s.action)), from=from, product_id=product_id,
-    bms=("Example", "Example", "0.1.0"))
+    bms=bms_from_env())
 end
 
 subs, skipped = manifest()

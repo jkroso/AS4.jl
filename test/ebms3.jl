@@ -13,7 +13,7 @@ mkmsg() = UserMessage(
   from=("12345678901", "http://abr.gov.au/PartyIdType/ABN", "http://sbr.gov.au/ato/Role/Business"),
   to=("51824753556", "http://abr.gov.au/PartyIdType/ABN", "http://sbr.gov.au/agency"),
   service="http://sbr.gov.au/ato/payevnt/2020", action="Submit.004.00",
-  properties=["ProductID"=>"ABC123", "BMS Vendor"=>"Example", "BMS Name"=>"Example", "BMS Version"=>"1.0"],
+  properties=["ProductID"=>"ABC123", "BMS Vendor"=>"Example Vendor", "BMS Name"=>"Example Payroll", "BMS Version"=>"1.0"],
   parts=[Part(payload; name="PAYEVNT", doctype="BASE", mime="text/xml")])
 
 const ns = ["s"=>S12, "eb"=>EB, "wsu"=>WSU]

@@ -3,14 +3,17 @@ Live EVTE PAYEVNT submit — run manually, never in CI:
 
   AS4_KEYSTORE=/path/to/evte.keystore.xml \
   AS4_PASSWORD=… \
+  AS4_PRODUCT_ID=… \
+  AS4_BMS_VENDOR=… AS4_BMS_NAME=… [AS4_BMS_VERSION=1.0] \
   AS4_SUITE=/path/to/payevnt-suite/inner \
   julia --project=. test/live_payevnt.jl
 
 Pushes conformance scenario BULK-001 (PAYEVNT + 3× PAYEVNTEMP) to the EVTE
 bulk channel as the matching test entity (YALACT129), then selective-pulls
-for the business response. AS4_PRODUCT_ID is the ATO-allocated EVTE product ID.
-All four documents travel in ONE attachment, separated by record delimiters —
-see `bulk_payload` in SBR.jl.
+for the business response. AS4_PRODUCT_ID is the ATO-allocated EVTE product
+ID; AS4_BMS_VENDOR / AS4_BMS_NAME must match the OS4DSP registration
+(Software Vendor Name / Product Name). All four documents travel in ONE
+attachment, separated by record delimiters — see `bulk_payload` in SBR.jl.
 =#
 @use "../SBR.jl" Env sts endpoints payevnt_message
 @use "../ebMS3.jl" UserMessage Part Receipt EbMSError TransportError push pull
@@ -22,6 +25,13 @@ const suite = expanduser(get(ENV, "AS4_SUITE", "/path/to/payevnt-suite/inner"))
 const scenario = joinpath(suite, "CONF-ATO-PAYEVNT-BULK-001")
 const ABN = "67094544519"  # YALACT P/L — payer in BULK-001, must match the credential entity
 
+# BMS MessageProperties must match the DSP's OS4DSP registration. Supply via
+# env — never hard-code a real DSP's identity in this open-source package.
+bms_from_env() = (
+  get(ENV, "AS4_BMS_VENDOR", "Example Vendor"),
+  get(ENV, "AS4_BMS_NAME", "Example Payroll"),
+  get(ENV, "AS4_BMS_VERSION", "1.0"))
+
 cred = load(expanduser(ENV["AS4_KEYSTORE"]), ENV["AS4_PASSWORD"]; id="ABRD:$(ABN)_YALACT129")
 @info "credential" cred.abn cred.legal_name cred.not_after
 
@@ -31,7 +41,7 @@ msg, ids = payevnt_message(
   doc("CONF-ATO-PAYEVNT-BULK-001_Submit_Request_01.xml"),
   [doc("CONF-ATO-PAYEVNTEMP-BULK-001_Submit_Request_0$i.xml") for i in 2:4];
   abn=ABN, product_id=get(ENV, "AS4_PRODUCT_ID", ""),
-  bms=("Example", "Example", "0.1.0"))
+  bms=bms_from_env())
 @info "message properties" msg.properties
 @info "record delimiters" ids payload_bytes = length(msg.parts[1].bytes)
 
