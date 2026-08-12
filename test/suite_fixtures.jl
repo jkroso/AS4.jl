@@ -54,4 +54,53 @@ fixups(path, xml) = begin
   end
 end
 
-payload(path) = Vector{UInt8}(fixups(path, fill_dates(read(path, String))))
+payload(path) = Vector{UInt8}(fillups(path, fill_dates(read(path, String))))
+
+# ── Response scoring ──────────────────────────────────────────────────────────
+#
+# EVTE responses are minified and include transport-level SBR.GEN.INFO.* codes
+# that the suite's pretty-printed expected files may list in a different order
+# or with different counts. Score on the multiset of *business* Error.Codes
+# (CMN.ATO.* and SBR.GEN.FAULT.*) — those are what the scenario is testing.
+
+"Every Error.Code value in an Event XML blob, in document order."
+error_codes(xml::AbstractString) =
+  [String(m.captures[1]) for m in eachmatch(r"Error\.Code>\s*([^<\s]+)\s*<", xml)]
+
+"Business Error.Codes only — scenario assertions, not transport noise."
+business_codes(xml::AbstractString) =
+  filter(c -> startswith(c, "CMN.ATO") || startswith(c, "SBR.GEN.FAULT"), error_codes(xml))
+
+code_counts(codes::AbstractVector{<:AbstractString}) = begin
+  d = Dict{String,Int}()
+  for c in codes
+    d[String(c)] = get(d, String(c), 0) + 1
+  end
+  d
+end
+
+"""
+Map a request path `…_Submit_Request_01.xml` to its sibling expected response
+`…_Submit_Response_01.xml`. Returns `nothing` when the suite has no expected
+file (should not happen for BULK scenarios that ship a Response).
+"""
+expected_response_path(request_path::AbstractString) = begin
+  dir, base = dirname(request_path), basename(request_path)
+  resp = replace(base, r"_Request_" => "_Response_")
+  path = joinpath(dir, resp)
+  isfile(path) ? path : nothing
+end
+
+"""
+Compare actual EVTE response XML (one or more parts concatenated) to the suite's
+expected response. Returns `(pass, expected_counts, actual_counts)`.
+"""
+score_response(actual_xml::AbstractString, expected_xml::AbstractString) = begin
+  exp, act = code_counts(business_codes(expected_xml)), code_counts(business_codes(actual_xml))
+  (exp == act, exp, act)
+end
+
+score_response_files(actual_paths, expected_path::AbstractString) = begin
+  actual = join((read(p, String) for p in actual_paths), '\n')
+  score_response(actual, read(expected_path, String))
+end
