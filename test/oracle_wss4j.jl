@@ -18,10 +18,11 @@ const pair = load_pem_keypair(joinpath(@__DIR__, "fixtures/key.pem"),
                               joinpath(@__DIR__, "fixtures/cert.pem"))
 const jbang = Sys.which("jbang")
 const oracle = joinpath(@__DIR__, "oracle", "Wss4jVerify.java")
+const trust_pem = joinpath(@__DIR__, "fixtures", "cert.pem")
 
 @testset "WSS4J oracle verifies a secured multipart dump" begin
   if jbang === nothing
-    @info "skip WSS4J oracle — install jbang (https://www.jbang.dev) and re-run"
+    @info "skip WSS4J oracle — install jbang + a JDK, then re-run"
     @test true
   else
     msg = UserMessage(
@@ -40,7 +41,9 @@ const oracle = joinpath(@__DIR__, "oracle", "Wss4jVerify.java")
       write(io, body)
     end
     try
-      proc = run(ignorestatus(`$jbang $oracle $path`))
+      # Pass the fixture cert as Merlin trust material — self-signed BSTs fail
+      # path validation against an empty trust store.
+      proc = run(ignorestatus(`$jbang $oracle $path $trust_pem`))
       @test success(proc)
     finally
       isfile(path) && rm(path)
