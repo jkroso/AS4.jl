@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Receiver P-Mode for AS4.jl fixture pushes (test/fixtures/key.pem + cert.pem).
+Installed by setup.sh into hb2b/repository/pmodes/.
+-->
+<PMode xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns="http://holodeck-b2b.org/schemas/2014/10/pmode"
+    xsi:schemaLocation="http://holodeck-b2b.org/schemas/2014/10/pmode ../../repository/xsd/pmode.xsd">
+    <id>as4jl-push</id>
+    <mep>http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/oneWay</mep>
+    <mepBinding>http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/push</mepBinding>
+    <Initiator>
+        <PartyId type="urn:oasis:names:tc:ebcore:partyid-type:unregistered">org:as4jl</PartyId>
+        <Role>http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/initiator</Role>
+        <SecurityConfiguration>
+            <Signing>
+                <!-- Public cert of AS4.jl fixture, imported as partner alias as4jl -->
+                <KeystoreAlias>as4jl</KeystoreAlias>
+            </Signing>
+        </SecurityConfiguration>
+    </Initiator>
+    <Responder>
+        <PartyId type="urn:oasis:names:tc:ebcore:partyid-type:unregistered">org:holodeck</PartyId>
+        <Role>http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/responder</Role>
+    </Responder>
+    <Leg>
+        <Receipt>
+            <ReplyPattern>RESPONSE</ReplyPattern>
+        </Receipt>
+        <DefaultDelivery>
+            <DeliveryMethod>org.holodeckb2b.backend.file.NotifyAndDeliverOperation</DeliveryMethod>
+            <Parameter>
+                <name>format</name>
+                <value>mmd</value>
+            </Parameter>
+            <Parameter>
+                <name>deliveryDirectory</name>
+                <value>data/msg_in</value>
+            </Parameter>
+        </DefaultDelivery>
+        <UserMessageFlow>
+            <BusinessInfo>
+                <Action>Deliver</Action>
+                <Service>
+                    <name>urn:test</name>
+                </Service>
+            </BusinessInfo>
+        </UserMessageFlow>
+    </Leg>
+</PMode>
