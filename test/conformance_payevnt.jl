@@ -283,25 +283,32 @@ else
                            message_id=msg.message_id, score="ERROR"))
       continue
     end
-    deadline = time() + poll_secs
-    got = nothing
-    while time() < deadline && got === nothing
-      sleep(15)
-      # Refresh STS assertion each poll — suite runs can exceed the 30 min lifetime.
-      _, token = token_for(lodging_abn(s))
-      got = try
-        pull(eps.bulk_pull, msg.message_id; cred=cred, assertion=token.assertion)
-      catch e
-        Base.push!(results, (label=lab, outcome="PULL: $(sprint(showerror, e))",
-                             message_id=msg.message_id, score="ERROR"))
-        break
+    # Poll in a function so soft-scope cannot leave `got` stuck as nothing.
+    pull_err = Ref{Any}(nothing)
+    got = let mid=msg.message_id, abn=lodging_abn(s), c=cred, dline=time()+poll_secs
+      resp = nothing
+      while time() < dline && resp === nothing
+        sleep(15)
+        _, tok = token_for(abn)
+        resp = try
+          pull(eps.bulk_pull, mid; cred=c, assertion=tok.assertion)
+        catch e
+          pull_err[] = e
+          break
+        end
       end
+      resp
+    end
+    if pull_err[] !== nothing
+      Base.push!(results, (label=lab, outcome="PULL: $(sprint(showerror, pull_err[]))",
+                           message_id=msg.message_id, score="ERROR"))
+      continue
     end
     if got isa UserMessage
       dest = joinpath(outdir, result_dirname(s))
       mkpath(dest)
       for (i, p) in enumerate(got.parts)
-        write(joinpath(dest, "$(p.name)_$i.xml"), p.bytes)
+        write(joinpath(dest, "$(isempty(p.name) ? "PAYEVNT" : p.name)_$i.xml"), p.bytes)
       end
       st, expc, actc = score_submission(s, outdir)
       detail = st == "PASS" ? "PASS $(fmt_counts(expc))" :
